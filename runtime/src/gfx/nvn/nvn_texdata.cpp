@@ -235,6 +235,24 @@ bool cache_read(const std::string& path, uint64_t key, PreparedTexture& out) {
 
 // ---- level geometry --------------------------------------------------------------------------------------------------------
 // One level of the tight linear buffer (the untiled image, or the pitch-linear copy).
+// One BC7 block of a single colour: mode 6, both endpoints the colour (7 bits + a 0 p-bit, so within 1/255), every index 0.
+void bc7_solid_block(const uint8_t* rgba, uint8_t* out) {
+    uint64_t lo = 0, hi = 0;
+    unsigned pos = 0;
+    auto put = [&](uint64_t v, unsigned n) {
+        for (unsigned b = 0; b < n; ++b, ++pos)
+            if ((v >> b) & 1) (pos < 64 ? lo : hi) |= uint64_t{1} << (pos & 63);
+    };
+    put(1u << 6, 7);   // mode 6
+    for (int c = 0; c < 4; ++c) {
+        put(rgba[c] >> 1, 7);
+        put(rgba[c] >> 1, 7);
+    }
+    // p-bits 0, indices 0: the rest of the block stays zero
+    std::memcpy(out, &lo, 8);
+    std::memcpy(out + 8, &hi, 8);
+}
+
 struct LevelGeom {
     uint32_t w = 1, h = 1, d = 1;   // texels
     uint32_t bx = 1, by = 1;        // blocks per row and rows, in the source format's blocks
@@ -764,7 +782,7 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     out.data.assign(static_cast<size_t>(out_total), 0);
     a2b_options opt{};
     opt.quality = provisional ? 0 : quality;
-    opt.threads = caps.encode_threads;   // 0: all hardware threads
+    opt.threads = provisional ? 1 : caps.encode_threads;   // 0: all hardware threads; a stand-in is small work: thread start-up per level cost more than the encode
     opt.perceptual = 0;
     opt.allow_opaque_mode6 = 0;
     a2b_input in{};
@@ -806,9 +824,47 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
                 bc7 ? "BC7" : "RGBA8", geo[0].w, geo[0].h, L.levels, ms);
         return true;
     }
+    // A stand-in only has to look right for the half second until the background job lands: the big levels are filled with
+    // solid BC7 blocks taken from a small level (decoded once per layer) instead of being encoded, so it costs about 1 ms, not 50-150.
+    size_t solid_src = geo.size();
+    if (provisional && geo[0].d == 1 && geo.size() > 1) {
+        static const uint32_t solid_max = static_cast<uint32_t>(std::max<int64_t>(16, config_get_int("nvn", "standin_full_px", 256)));
+        for (size_t i = 0; i < geo.size(); ++i)
+            if (std::max(geo[i].w, geo[i].h) <= solid_max) { solid_src = i; break; }
+        if (solid_src == 0 || solid_src >= geo.size()) solid_src = geo.size();
+    }
+    std::vector<uint8_t> solid_rgba;
+    uint32_t solid_layer = ~0u;
     for (size_t i = 0; i < geo.size(); ++i) {
         const LevelGeom& g = geo[i];
         const PreparedLevel& pl = out.level[i];
+        if (i < solid_src && solid_src < geo.size()) {
+            const LevelGeom& sg = geo[solid_src];
+            const uint64_t out_slice = pl.size / L.layers;
+            const uint32_t bw = (g.w + 3) / 4, bh = (g.h + 3) / 4;
+            if (out_slice != static_cast<uint64_t>(bw) * bh * 16) return fail("internal: BC7 stand-in size mismatch");
+            for (uint32_t layer = 0; layer < L.layers; ++layer) {
+                if (solid_layer != layer) {
+                    a2b_input sin = in;
+                    sin.width = sg.w;
+                    sin.height = sg.h;
+                    solid_rgba.resize(static_cast<size_t>(sg.w) * sg.h * 4);
+                    const a2b_status st = a2b_decode_astc_rgba8(&sin, lin.data() + sg.lin_off + static_cast<uint64_t>(layer) * sg.slice,
+                                                                static_cast<size_t>(sg.slice), 1, solid_rgba.data(), nullptr);
+                    if (st != A2B_OK) return fail(std::string("ASTC decode for the stand-in failed: ") + a2b_status_string(st));
+                    solid_layer = layer;
+                }
+                uint8_t* dst = out.data.data() + pl.offset + static_cast<uint64_t>(layer) * out_slice;
+                for (uint32_t by = 0; by < bh; ++by) {
+                    const uint32_t sy = std::min(sg.h - 1, static_cast<uint32_t>((static_cast<uint64_t>(by) * 4 + 2) * sg.h / g.h));
+                    for (uint32_t bx = 0; bx < bw; ++bx) {
+                        const uint32_t sx = std::min(sg.w - 1, static_cast<uint32_t>((static_cast<uint64_t>(bx) * 4 + 2) * sg.w / g.w));
+                        bc7_solid_block(solid_rgba.data() + (static_cast<size_t>(sy) * sg.w + sx) * 4, dst + (static_cast<size_t>(by) * bw + bx) * 16);
+                    }
+                }
+            }
+            continue;
+        }
         in.width = g.w;
         in.height = g.h;
         const uint64_t out_slice = pl.size / L.layers / g.d;   // bytes of one z slice of the output
