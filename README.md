@@ -119,7 +119,7 @@ the shader translator). Its `fefw.exe` is linked on the player's PC by `tools\bu
 pwsh -File game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON"
 cd launcher && npm install && npm run tauri build -- --no-bundle && cd ..
 pwsh -File tools\shaders\scripts\setup_ryujinx.ps1 -Ryubing work\refs\ryubing
-pwsh -File game-build\scripts\make-release.ps1 -Version 0.1.0
+pwsh -File game-build\scripts\make-release.ps1 -Version 0.1.1
 ```
 
 `make-release.ps1` downloads Zig (checked against ziglang.org's sha256), the Python embeddable package and the Python wheels into
