@@ -21,6 +21,7 @@
 //   [media] video_decoder_threads = 4     dav1d worker threads per decoder
 //   [media] video_decoder_log = 1         one log line per decoder call (verbose)
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <cerrno>
 #include <condition_variable>
@@ -155,6 +156,11 @@ struct Decoder {
     std::deque<Packet> queue;                // packets not decoded yet
     std::deque<Picture> decoded;             // pictures waiting for a free frame
     uint64_t packets = 0, pictures = 0;
+    // the movie's clock (skip_late): picture timestamps against the host clock; unit = seconds per timestamp tick, learned from the spacing
+    bool clk_on = false;
+    int64_t clk_ts0 = 0, clk_last = 0, last_time = 0;
+    double clk_t0 = 0, unit = 0;
+    uint64_t skipped = 0;
     bool warned_size = false, warned_format = false, warned_mime = false, warned_error = false;
     services::ServiceEvent in_ready, out_ready;   // attached to in_ev / out_ev: any thread can signal them
     alignas(16) uint8_t in_ev[0x100]{}, out_ev[0x100]{}, fmt_ev[0x100]{};
@@ -180,11 +186,53 @@ void to_nv12(uint8_t* o, uint32_t w, uint32_t h, const uint8_t* py, ptrdiff_t sy
 
 uint64_t nv12_size(uint32_t w, uint32_t h) { return static_cast<uint64_t>(w) * h + static_cast<uint64_t>((w + 1) / 2) * 2 * ((h + 1) / 2); }
 
+// A player that shows one picture a frame plays a 60 fps movie at the game's frame rate: Ocarina of Time's AV1 movies ran far below real time
+// with their sound ahead while the game drew 10 to 30 frames a second. So pictures go by the clock, as a video player does (nxnative oot2
+// 3b588ca6): the timestamps from the first picture against the host clock, and of the waiting pictures the newest one that is due, the late
+// ones before it dropped. A picture is late once the next is 50 ms overdue (no slack would make a game one frame behind skip every other
+// picture). A stall over a second (a load, a pause) or a timestamp going back (a loop, a new stream) starts the clock again; Flush too.
+// A game that keeps up drops nothing. [media] movie_clock = 0 turns it off. The timestamp unit (us or ns) is learned from the spacing.
+double host_seconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+void learn_unit(Decoder& d, int64_t t) {
+    if (d.unit == 0 && d.last_time && t > d.last_time) {
+        const int64_t dt = t - d.last_time;   // one picture: ~16,667 at 60 fps in us, ~16,666,667 in ns, ~17 in ms
+        if (dt >= 2000 && dt <= 200000) d.unit = 1e-6;
+        else if (dt >= 2000000 && dt <= 200000000) d.unit = 1e-9;
+        else if (dt >= 2 && dt <= 200) d.unit = 1e-3;
+        if (d.unit != 0) NXLOG_I(kTag, "movie clock: timestamps in %s (picture spacing %lld)", d.unit == 1e-6 ? "us" : d.unit == 1e-9 ? "ns" : "ms",
+                                 static_cast<long long>(dt));
+    }
+    d.last_time = t;
+}
+
+void skip_late(Decoder& d) {   // lock held, at least one decoded picture
+    static const bool on = config_get_bool("media", "movie_clock", true);
+    if (!on || d.unit == 0 || d.decoded.front().eos) return;
+    const double now = host_seconds();
+    const int64_t ts = d.decoded.front().time;
+    if (!d.clk_on || ts < d.clk_last || now - (d.clk_t0 + static_cast<double>(ts - d.clk_ts0) * d.unit) > 1.0) {
+        d.clk_on = true;
+        d.clk_ts0 = ts;
+        d.clk_t0 = now;
+        return;
+    }
+    while (d.decoded.size() > 1 && !d.decoded[1].eos && d.clk_t0 + static_cast<double>(d.decoded[1].time - d.clk_ts0) * d.unit <= now - 0.05) {
+        d.decoded.pop_front();
+        if (!d.skipped++) NXLOG_I(kTag, "movie clock: late pictures skipped to keep the movie in time (the game shows fewer pictures a second than the movie has)");
+    }
+}
+
 // Moves decoded pictures into free frames (caller holds the lock) and wakes the player when one is ready.
 void deliver(Decoder& d) {
     bool any = false;
     while (!d.decoded.empty() && !d.free_.empty()) {
+        skip_late(d);
         Picture& p = d.decoded.front();
+        if (!p.eos) {
+            learn_unit(d, p.time);
+            d.clk_last = p.time;
+        }
         const uint64_t f = d.free_.back();
         d.free_.pop_back();
         uint64_t y = 0, uv = 0;
@@ -574,6 +622,8 @@ void vd_flush(::Ctx* c) {   // (self)
     {
         std::lock_guard<std::mutex> lk(d->mu);
         ++d->generation;
+        d->clk_on = false;
+        d->last_time = 0;
         d->queue.clear();
         d->decoded.clear();
         d->ready.clear();
