@@ -527,6 +527,10 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
         c
     };
     c.arg("--batch").arg(p.corpus()).arg("--out").arg(p.spirv()).args(["--jobs", &jobs.to_string()]);
+    // SPIR-V validation needs spirv-val from the Vulkan SDK, which players do not have (the release package never validates)
+    if p.package.is_some() || (std::env::var_os("VULKAN_SDK").is_none() && which("spirv-val.exe").is_none()) {
+        c.arg("--no-val");
+    }
     if !r.run("shaders", "Translating the shaders to SPIR-V", c, cwd)? {
         return Ok(false);
     }

@@ -6,7 +6,7 @@
 #
 # Inputs, built beforehand from this checkout:
 #   fefw_rt.dll + fefw_rt.lib   pwsh game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON"
-#   fefw-launcher.exe           cd launcher; npm install; npm run tauri build -- --no-bundle
+#   fefw-launcher.exe           built here (npm, Rust) with the build machine's paths remapped, unless -Launcher names one
 #   the shader translator       staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1); this script runs dotnet publish
 # Third-party payload, downloaded into the cache folder from the official sites: Zig (checked against ziglang.org's sha256), the Python
 # embeddable package, and the wheels of capstone, lz4, zbic and zstandard (pip, for CPython 3.13 win_amd64).
@@ -25,6 +25,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $Out) { $Out = Join-Path $root 'work\release' }
 if (-not $RtDir) { $RtDir = Join-Path $root 'game-build\fefw\build\rtdll' }
+$buildLauncher = -not $Launcher
 if (-not $Launcher) { $Launcher = Join-Path $root 'launcher\src-tauri\target\release\fefw-launcher.exe' }
 $cache = Join-Path $Out 'cache'
 $name = "fefw-recomp-$Version"
@@ -66,6 +67,16 @@ function Fetch([string]$url, [string]$file, [string]$sha = "") {
 
 Need (Join-Path $RtDir 'fefw_rt.dll') 'fefw_rt.dll (build it with -DFEFW_RT_DLL=ON)'
 Need (Join-Path $RtDir 'fefw_rt.lib') 'fefw_rt.lib'
+if ($buildLauncher) {
+    # Rust keeps source paths for panic messages: map the user profile (cargo registry, rustup) and the checkout to neutral names
+    $env:RUSTFLAGS = "--remap-path-prefix=$($env:USERPROFILE)=~ --remap-path-prefix=$root=."
+    if ($env:CARGO_HOME) { $env:RUSTFLAGS += " --remap-path-prefix=$($env:CARGO_HOME)=cargo" }
+    Push-Location (Join-Path $root 'launcher')
+    try {
+        npm install --no-audit --no-fund; if ($LASTEXITCODE) { throw 'npm install failed' }
+        npm run tauri build -- --no-bundle; if ($LASTEXITCODE) { throw 'launcher build failed' }
+    } finally { Pop-Location; Remove-Item Env:RUSTFLAGS }
+}
 Need $Launcher 'fefw-launcher.exe'
 
 # --- built from this checkout
@@ -94,7 +105,9 @@ Put "$root\tools\shaders\licenses\LICENSE.Ryubing.MIT" 'licenses\LICENSE.Ryujinx
 $harness = Join-Path $Out 'harness'
 if (-not (Test-Path (Join-Path $harness 'spirv_harness.exe'))) {
     Need "$root\tools\shaders\third_party\ryubing" 'staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1)'
-    dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness
+    # no debug info and no build paths in the published DLLs
+    dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness `
+        -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$root=."
     if ($LASTEXITCODE) { throw 'dotnet publish failed' }
 }
 Mirror $harness 'tools\spirv_harness' @('*.pdb')
@@ -137,6 +150,21 @@ $bad = Get-ChildItem $pkg -Recurse -Force | Where-Object {
     (-not $_.PSIsContainer -and (Magic $_) -in 'NSO0', 'NRO0', 'NCA3', 'PFS0', 'HFS0', 'BNSH', 'SARC', 'NUP')
 }
 if ($bad) { $bad | ForEach-Object { Write-Error "game-derived or private file in the package: $($_.FullName)" -ErrorAction Continue }; throw 'package check failed' }
+
+# --- and nothing that names the machine it was built on: the builder's profile path, in ASCII or UTF-16
+$needles = @($env:USERPROFILE, $env:USERPROFILE.Replace('\', '/')) | Where-Object { $_ -and $_.Length -ge 8 }
+$leaks = Get-ChildItem $pkg -Recurse -File | Where-Object {
+    $bytes = [IO.File]::ReadAllBytes($_.FullName)
+    $hit = $false
+    foreach ($n in $needles) {
+        foreach ($enc in [Text.Encoding]::ASCII, [Text.Encoding]::Unicode) {
+            $text = $enc.GetString($bytes)
+            if ($text.IndexOf($n, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true }
+        }
+    }
+    $hit
+}
+if ($leaks) { $leaks | ForEach-Object { Write-Error "build-machine path in the package: $($_.FullName)" -ErrorAction Continue }; throw 'package check failed' }
 
 if ($NoZip) { Write-Host "staged $pkg"; return }
 $zip = Join-Path $Out "$name-win64.zip"
