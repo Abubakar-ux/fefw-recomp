@@ -1067,16 +1067,28 @@ std::atomic<uint64_t> g_ob_end{0}, g_ob_gpu{0}, g_ob_fault{0}, g_ob_inval{0};
 std::atomic<uint64_t> g_why_bytes[kOutWhyCount], g_why_n[kOutWhyCount];   // GPU-reader copy-backs by reason
 std::atomic<uint64_t> g_on_fault{0}, g_on_inval{0}, g_on_deferred{0}, g_on_eager_read{0}, g_on_eager_noguard{0}, g_on_gpu_flush{0};
 
+// A word (64 pages) at a time: page by page, one locked RMW each, it was ~6 % of the render thread in Dagsion crowds (out_add on every
+// draw binding a storage buffer of hundreds of pages). A word already in the wanted state is left alone (no RMW, no cache-line write).
 void bits_set(std::atomic<uint64_t>* bm, uint64_t first, uint64_t last, bool on) {
-    for (uint64_t p = first; p <= last; ++p) {
-        const uint64_t b = uint64_t{1} << (p & 63);
-        if (on) bm[p >> 6].fetch_or(b, std::memory_order_acq_rel);
-        else bm[p >> 6].fetch_and(~b, std::memory_order_acq_rel);
+    if (first > last) return;
+    for (uint64_t w = first >> 6, wl = last >> 6; w <= wl; ++w) {
+        const uint64_t lo = w == (first >> 6) ? (first & 63) : 0, hi = w == wl ? (last & 63) : 63;
+        const uint64_t mask = (hi == 63 ? ~uint64_t{0} : ((uint64_t{1} << (hi + 1)) - 1)) & ~((uint64_t{1} << lo) - 1);
+        const uint64_t cur = bm[w].load(std::memory_order_acquire);
+        if (on) {
+            if ((cur & mask) != mask) bm[w].fetch_or(mask, std::memory_order_acq_rel);
+        } else {
+            if (cur & mask) bm[w].fetch_and(~mask, std::memory_order_acq_rel);
+        }
     }
 }
 bool bits_any(const std::atomic<uint64_t>* bm, uint64_t first, uint64_t last) {
-    for (uint64_t p = first; p <= last; ++p)
-        if ((bm[p >> 6].load(std::memory_order_acquire) >> (p & 63)) & 1) return true;
+    if (first > last) return false;
+    for (uint64_t w = first >> 6, wl = last >> 6; w <= wl; ++w) {
+        const uint64_t lo = w == (first >> 6) ? (first & 63) : 0, hi = w == wl ? (last & 63) : 63;
+        const uint64_t mask = (hi == 63 ? ~uint64_t{0} : ((uint64_t{1} << (hi + 1)) - 1)) & ~((uint64_t{1} << lo) - 1);
+        if (bm[w].load(std::memory_order_acquire) & mask) return true;
+    }
     return false;
 }
 

@@ -836,6 +836,8 @@ std::string gpu_report() {
 }
 }  // namespace
 
+int presents_since(uint64_t serial);   // below, beside the frame history
+
 bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
     if (!g || !serial) return true;
     if (serial_done(serial)) return true;
@@ -846,12 +848,40 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
     g_wait_serial.store(serial);
     g_wait_timeout.store(timeout_ns);
     struct Counted { Counted() { g_waiters++; g_waits_begun++; } ~Counted() { g_waiters--; g_waits_done++; } } counted;
+    // Where a game sync wait spends its time (log line every 10 s): entered while the render thread had not recorded the fenced work yet
+    // ("replay": the wait covers replay + GPU), or after ("gpu": the GPU alone). Submissions behind = how far the fence is past what is recorded.
+    static std::atomic<uint64_t> w_n[2], w_us[2], w_behind{0}, w_last_ms{0}, w_age_n[4], w_age_us[4];
+    const uint64_t rec = g->last_submitted.load(std::memory_order_relaxed);
+    const int kind = serial > rec ? 0 : 1;
+    const int age = presents_since(serial);
+    if (kind == 0) w_behind.fetch_add(serial - rec, std::memory_order_relaxed);
+    const auto tw0 = std::chrono::steady_clock::now();
     VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
     wi.semaphoreCount = 1;
     wi.pSemaphores = &g->timeline;
     wi.pValues = &serial;
     const VkResult r = vkWaitSemaphores(g->dev->device(), &wi, timeout_ns);
     read_completed();
+    const auto tw1 = std::chrono::steady_clock::now();
+    w_n[kind].fetch_add(1, std::memory_order_relaxed);
+    const uint64_t us_w = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(tw1 - tw0).count());
+    w_us[kind].fetch_add(us_w, std::memory_order_relaxed);
+    w_age_n[age].fetch_add(1, std::memory_order_relaxed);
+    w_age_us[age].fetch_add(us_w, std::memory_order_relaxed);
+    const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(tw1.time_since_epoch()).count());
+    uint64_t last = w_last_ms.load(std::memory_order_relaxed);
+    if (!last) w_last_ms.compare_exchange_strong(last, now_ms);
+    else if (now_ms - last >= 10000 && w_last_ms.compare_exchange_strong(last, now_ms)) {
+        const uint64_t n0 = w_n[0].exchange(0), n1 = w_n[1].exchange(0), u0 = w_us[0].exchange(0), u1 = w_us[1].exchange(0), b = w_behind.exchange(0);
+        NXLOG_I(kTag, "sync waits, last %.1f s: behind the render thread %llu (%.1f ms total, %.2f submissions behind on average), on the GPU only %llu (%.1f ms total)",
+                (now_ms - last) / 1000.0, static_cast<unsigned long long>(n0), u0 / 1000.0, n0 ? static_cast<double>(b) / n0 : 0.0,
+                static_cast<unsigned long long>(n1), u1 / 1000.0);
+        uint64_t an[4], au[4];
+        for (int i = 0; i < 4; ++i) { an[i] = w_age_n[i].exchange(0); au[i] = w_age_us[i].exchange(0); }
+        NXLOG_I(kTag, "sync waits by fence age (presents since it was queued): 0: %llu (%.1f ms), 1: %llu (%.1f ms), 2: %llu (%.1f ms), 3+: %llu (%.1f ms)",
+                static_cast<unsigned long long>(an[0]), au[0] / 1000.0, static_cast<unsigned long long>(an[1]), au[1] / 1000.0,
+                static_cast<unsigned long long>(an[2]), au[2] / 1000.0, static_cast<unsigned long long>(an[3]), au[3] / 1000.0);
+    }
     return r == VK_SUCCESS;
 }
 
@@ -869,6 +899,14 @@ bool gpu_wait_frames(int frames_back, uint64_t timeout_ns) {
     return wait_serial(serial, timeout_ns);
 }
 }  // namespace
+
+// Presents the game made after `serial` was queued (0: the fence is in the frame being built; 3: three or more frames back).
+int presents_since(uint64_t serial) {
+    const uint64_t n = g_frame_count.load(std::memory_order_acquire);
+    int k = 0;
+    while (k < 3 && static_cast<uint64_t>(k) < n && g_frame_work[(n - 1 - static_cast<uint64_t>(k)) & 3].load(std::memory_order_relaxed) >= serial) ++k;
+    return k;
+}
 
 // [nvn] present_ahead (default 1; 0 = wait for each present): the game thread queues the present and goes on while fewer than this many
 // presents are still pending on the render thread (the frame limiter and the swapchain's frame slots pace the render thread). 1 keeps the
