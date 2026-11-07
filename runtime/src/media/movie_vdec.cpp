@@ -22,6 +22,7 @@
 //   [media] video_decoder_log = 1         one log line per decoder call (verbose)
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <atomic>
 #include <cerrno>
 #include <condition_variable>
@@ -47,6 +48,11 @@
 #if NXRT_HAVE_DAV1D
 #include <dav1d/dav1d.h>
 #endif
+
+namespace nxrt::nvn::be::gpu {   // gfx/nvn/nvn_gpu.h (its header needs the NVN include path)
+uint64_t last_serial();
+bool serial_done(uint64_t serial);
+}  // namespace nxrt::nvn::be::gpu
 
 namespace nxrt::media {
 
@@ -155,6 +161,10 @@ struct Decoder {
     std::deque<uint64_t> ready;              // frames with a picture, not acquired yet
     std::deque<Packet> queue;                // packets not decoded yet
     std::deque<Picture> decoded;             // pictures waiting for a free frame
+    // Frames the player gave back, with the GPU serial at that moment: free once the GPU passed it. Fortune's Weave's CPU-frame path
+    // polls one fence (sync[0], main 0x1902870) for every buffer, so it released buffers whose NV12 copy to the textures had not run
+    // yet; the next picture written into them showed 3 of 4 pictures early or torn (the choppy cutscenes).
+    std::deque<std::pair<uint64_t, uint64_t>> pending_free;
     uint64_t packets = 0, pictures = 0;
     // the movie's clock (skip_late): picture timestamps against the host clock; unit = seconds per timestamp tick, learned from the spacing
     bool clk_on = false;
@@ -226,6 +236,10 @@ void skip_late(Decoder& d) {   // lock held, at least one decoded picture
 // Moves decoded pictures into free frames (caller holds the lock) and wakes the player when one is ready.
 void deliver(Decoder& d) {
     bool any = false;
+    while (!d.pending_free.empty() && nvn::be::gpu::serial_done(d.pending_free.front().second)) {
+        d.free_.push_back(d.pending_free.front().first);
+        d.pending_free.pop_front();
+    }
     while (!d.decoded.empty() && !d.free_.empty()) {
         skip_late(d);
         Picture& p = d.decoded.front();
@@ -325,7 +339,14 @@ void worker_main(Decoder* d) {
     uint64_t gen = d->generation;
     std::unique_lock<std::mutex> lk(d->mu);
     for (;;) {
-        d->cv.wait(lk, [&] { return d->stop || (!d->queue.empty() && d->decoded.size() < kAhead); });
+        const auto can_work = [&] { return d->stop || (!d->queue.empty() && d->decoded.size() < kAhead); };
+        while (!can_work()) {
+            if (d->pending_free.empty()) d->cv.wait(lk);
+            else {   // frames wait for the GPU: look again shortly (deliver frees them and wakes the player)
+                d->cv.wait_for(lk, std::chrono::milliseconds(1));
+                if (!d->decoded.empty()) deliver(*d);
+            }
+        }
         if (d->stop) break;
         if (gen != d->generation) {
             if (av1) dav1d_close(&av1);
@@ -426,6 +447,7 @@ void retire(uint64_t self, Decoder* d) {
         d->queue.clear();
         d->decoded.clear();
         d->ready.clear();
+        d->pending_free.clear();
         d->free_.clear();
         d->frames.clear();
     }
@@ -494,6 +516,7 @@ void vd_register_frames(::Ctx* c) {   // (self, VideoFrame** frames, int n)
     std::lock_guard<std::mutex> lk(d->mu);
     d->frames.clear();
     d->free_.clear();
+    d->pending_free.clear();
     d->ready.clear();
     for (int i = 0; i < n; ++i) d->frames.push_back(rd64(list + 8ull * i));
     for (int i = n - 1; i >= 0; --i) d->free_.push_back(d->frames[i]);
@@ -606,7 +629,9 @@ void vd_release(::Ctx* c) {   // (self, VideoFrame*)
         std::lock_guard<std::mutex> lk(d->mu);
         const bool known = std::find(d->frames.begin(), d->frames.end(), f) != d->frames.end();
         const bool already = std::find(d->free_.begin(), d->free_.end(), f) != d->free_.end();
-        if (f && known && !already && d->free_.size() < kMaxFrames) d->free_.push_back(f);
+        const bool pending = std::any_of(d->pending_free.begin(), d->pending_free.end(), [f](const auto& p) { return p.first == f; });
+        if (f && known && !already && !pending && d->free_.size() + d->pending_free.size() < kMaxFrames)
+            d->pending_free.emplace_back(f, nvn::be::gpu::last_serial());
         s_released++;
         if (g_log) NXLOG_I(kTag, "ReleaseVideoFrame: %llx%s; queued %zu, decoded %zu, ready %zu, free %zu", static_cast<unsigned long long>(f),
                            known ? (already ? " (already free)" : "") : " (not registered)", d->queue.size(), d->decoded.size(), d->ready.size(),
@@ -627,6 +652,7 @@ void vd_flush(::Ctx* c) {   // (self)
         d->queue.clear();
         d->decoded.clear();
         d->ready.clear();
+        d->pending_free.clear();
         d->free_.clear();
         for (auto it = d->frames.rbegin(); it != d->frames.rend(); ++it) d->free_.push_back(*it);
     }
