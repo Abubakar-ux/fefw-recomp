@@ -2,7 +2,7 @@
 
 Tauri 2 launcher for this repository's `fefw.exe`. It ships no game files and never writes to your dump. It works on a checkout of
 the repository: it finds the checkout from its own location (or Settings, Repository folder), checks your dump, runs the repository's
-own setup steps on your PC (see the README at the root), writes `fefw.ini` in a run folder (`work/play` by default) and starts the game.
+own setup steps on your PC (see docs/BUILDING.md), writes `fefw.ini` in a run folder (`work/play` by default) and starts the game.
 
 - Build: `npm install`, then `npm run tauri build -- --no-bundle`; the exe is `src-tauri/target/release/fefw-launcher.exe`.
 - Development: `npm run tauri dev`; `cargo test` in `src-tauri` runs the unit tests.
