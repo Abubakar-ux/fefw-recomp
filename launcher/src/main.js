@@ -7,6 +7,7 @@ import * as play from './pages/play.js';
 import * as settings from './pages/settings.js';
 import * as setup from './pages/setup.js';
 import * as about from './pages/about.js';
+import { upd, notify, checkNow, available } from './update.js';
 
 const PAGES = {
   play: { mod: play, label: 'Play', icon: 'play' },
@@ -34,7 +35,12 @@ function drawNav() {
     `<div class="brand"><img class="mark" src="/icon.png" alt=""><span class="name">fefw recomp</span></div>` +
     Object.entries(PAGES)
       .map(([id, p]) => `<button class="nav-item ${id === current ? 'active' : ''}" data-page="${id}">${icon(p.icon)}<span class="label">${p.label}</span></button>`)
-      .join('');
+      .join('') +
+    (available() || upd.status.state === 'done'
+      ? `<button class="nav-item update-pill" data-page="about">${icon('circle-arrow-up')}<span class="label">${
+          upd.status.state === 'done' ? 'Restart to update' : `Update to ${upd.check.latest.version}`
+        }</span></button>`
+      : '');
   nav.querySelectorAll('[data-page]').forEach((b) => b.addEventListener('click', () => go(b.dataset.page)));
   refreshIcons();
 }
@@ -59,6 +65,11 @@ async function boot() {
   await listen('game-status', (ev) => statusHandler && statusHandler(ev.payload));
   await listen('setup-status', (ev) => setupHandler && setupHandler(ev.payload));
   await listen('setup-log', (ev) => logHandler && logHandler(ev.payload));
+  await listen('update-status', (ev) => {
+    upd.status = ev.payload;
+    notify();
+  });
+  upd.listeners.add(drawNav);
   let cfg = { dump_dir: '' };
   try {
     cfg = await api('get_config');
@@ -67,6 +78,7 @@ async function boot() {
   }
   // first run: no game files chosen yet
   go(cfg.dump_dir ? 'play' : 'setup', { firstRun: !cfg.dump_dir });
+  if (!cfg.skip_update_check) checkNow(); // quietly: a failure only shows on the About page
 }
 
 boot();

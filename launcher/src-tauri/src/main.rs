@@ -9,6 +9,7 @@ mod nup;
 mod play;
 mod settings;
 mod setup;
+mod update;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -32,6 +33,8 @@ struct Config {
     /// Build processes. 0: one fewer than the CPU threads.
     jobs: u32,
     minimize_on_play: bool,
+    /// do not ask GitHub for a newer release when the launcher starts
+    skip_update_check: bool,
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -358,11 +361,91 @@ fn open_setup_log(app: AppHandle) -> Result<(), String> {
     play::open_with_shell(&log)
 }
 
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<update::Check, String> {
+    // FEFW_LAUNCHER_PRETEND_VERSION: test the update path against the published release from an older-looking launcher
+    let current = std::env::var("FEFW_LAUNCHER_PRETEND_VERSION").ok().filter(|v| update::parse_version(v).is_some()).unwrap_or_else(|| app.package_info().version.to_string());
+    let package = package_tools().is_some();
+    tauri::async_runtime::spawn_blocking(move || update::check(&current, package)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn update_status(state: State<Arc<update::Shared>>) -> update::Status {
+    let mut s = state.status.lock().unwrap().clone();
+    if s.state.is_empty() {
+        s.state = "idle".into();
+    }
+    s
+}
+
+#[tauri::command]
+fn start_update(
+    app: AppHandle,
+    state: State<Arc<update::Shared>>,
+    setup_state: State<Arc<setup::Shared>>,
+    play_state: State<play::PlayState>,
+    release: update::Release,
+) -> Result<(), String> {
+    if package_tools().is_none() {
+        return Err("Updates are for the release package. In a checkout, use git.".into());
+    }
+    if setup_state.progress.lock().unwrap().state == "running" {
+        return Err("Setup is running. Wait for it or pause it first.".into());
+    }
+    if play_state.0.lock().unwrap().state == "running" {
+        return Err("The game is running. Close it first.".into());
+    }
+    {
+        let mut s = state.status.lock().unwrap();
+        if s.state == "running" {
+            return Err("An update is already running.".into());
+        }
+        *s = update::Status { state: "running".into(), phase: "download".into(), message: "Starting".into(), version: release.version.clone(), ..Default::default() };
+    }
+    let cfg = load_config(&app);
+    let install = exe_dir();
+    let game_dir = repo_of(&cfg).map(|r| game_dir_of(&cfg, &r)).unwrap_or_else(|| install.clone());
+    let shared = state.inner().clone();
+    shared.cancel.store(false, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let a = app.clone();
+        let emit = move |s: update::Status| {
+            let _ = a.emit("update-status", s);
+        };
+        let run = update::Run { shared: &shared, install, game_dir, emit: &emit };
+        let end = match run.run(&release) {
+            Ok(s) => s,
+            Err(e) => update::Status { state: "error".into(), message: e, version: release.version.clone(), ..Default::default() },
+        };
+        *shared.status.lock().unwrap() = end.clone();
+        let _ = app.emit("update-status", end);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_update(state: State<Arc<update::Shared>>) {
+    state.cancel.store(true, Ordering::SeqCst);
+}
+
+/// Starts the (new) launcher from the install folder and closes this one.
+#[tauri::command]
+fn restart_launcher(app: AppHandle) -> Result<(), String> {
+    let exe = exe_dir().join("fefw-launcher.exe");
+    std::process::Command::new(&exe).current_dir(exe_dir()).spawn().map_err(|e| format!("cannot start {}: {e}", exe.display()))?;
+    app.exit(0);
+    Ok(())
+}
+
 fn main() {
+    if package_tools().is_some() {
+        update::cleanup(&exe_dir());
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(play::PlayState::default())
         .manage(Arc::new(setup::Shared::default()))
+        .manage(Arc::new(update::Shared::default()))
         .on_window_event(|window, event| {
             // closing the window pauses a running setup rather than leaving its compilers behind
             if let tauri::WindowEvent::Destroyed = event {
@@ -390,6 +473,11 @@ fn main() {
             open_game_file,
             open_game_dir,
             open_setup_log,
+            check_update,
+            update_status,
+            start_update,
+            cancel_update,
+            restart_launcher,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");

@@ -266,7 +266,7 @@ pub fn complete(p: &Paths) -> bool {
     steps(p, None).iter().all(|s| s.state == "done")
 }
 
-fn quiet(cmd: &mut Command) {
+pub(crate) fn quiet(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
