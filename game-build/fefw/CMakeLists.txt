@@ -44,6 +44,9 @@ add_subdirectory("${FEFW_RUNTIME_DIR}" runtime)
 # library fefw_rt.lib); fefw.exe is linked on the player's PC from the libraries lifted out of their own dump and src/fefw_stub.cpp
 # (tools/build/fefw_build.py in the package, with the bundled Zig). Nothing lifted is imported here.
 option(FEFW_RT_DLL "build the runtime as fefw_rt.dll for the release package" OFF)
+if(FEFW_RT_DLL AND NOT NXRT_ASTC2BC7)
+    message(FATAL_ERROR "FEFW_RT_DLL=ON needs the ASTC transcoder (NXRT_ASTC2BC7=ON): without it desktop GPUs render most textures black")
+endif()
 if(FEFW_RT_DLL)
     add_library(fefw_rt SHARED src/fefw_main.cpp src/fefw_rt.def)
     target_include_directories(fefw_rt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" src)

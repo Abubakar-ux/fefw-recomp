@@ -67,6 +67,10 @@ function Fetch([string]$url, [string]$file, [string]$sha = "") {
 
 Need (Join-Path $RtDir 'fefw_rt.dll') 'fefw_rt.dll (build it with -DFEFW_RT_DLL=ON)'
 Need (Join-Path $RtDir 'fefw_rt.lib') 'fefw_rt.lib'
+# Desktop GPUs have no ASTC: a runtime built with NXRT_ASTC2BC7=OFF renders most textures black (issue #1). Refuse to package one.
+if (Select-String -Path (Join-Path $RtDir 'fefw_rt.dll') -SimpleMatch 'NXRT_ASTC2BC7=OFF' -Quiet) {
+    throw "fefw_rt.dll was built without the ASTC transcoder (NXRT_ASTC2BC7=OFF): reconfigure with -DNXRT_ASTC2BC7=ON"
+}
 if ($buildLauncher) {
     # Rust keeps source paths for panic messages: map the user profile (cargo registry, rustup) and the checkout to neutral names
     $env:RUSTFLAGS = "--remap-path-prefix=$($env:USERPROFILE)=~ --remap-path-prefix=$root=."
