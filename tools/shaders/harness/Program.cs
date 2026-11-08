@@ -62,6 +62,7 @@ namespace SpirvHarness
             Debug = args.Contains("--debug-mode");
             try
             {
+                if (args.Length >= 2 && args[0] == "--warp-tests") return WarpTests.Run(args[1]);
                 if (args.Length >= 2 && args[0] == "--batch") return Batch(args);
                 if (args.Length >= 2 && !args[0].StartsWith("-")) return Single(args);
             }

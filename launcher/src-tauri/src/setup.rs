@@ -228,11 +228,14 @@ fn textures_ok(p: &Paths) -> bool {
     p.repo.join("tools").join("textures").join("third_party").join("astc-encoder").join("Source").join("astcenc.h").is_file()
 }
 
+const SHADER_TRANSLATOR_VERSION: u32 = 2; // portable 32-lane warps
+
 fn shaders_ok(p: &Paths) -> bool {
     let stamp = fs::read_to_string(p.shader_stamp()).unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&stamp).unwrap_or_default();
     p.spirv().join("results.tsv").is_file()
         && v["complete"].as_bool() == Some(true)
+        && v["translator_version"].as_u64() == Some(SHADER_TRANSLATOR_VERSION as u64)
         && v["romfs"].as_str() == Some(crate::dump::fwd(&p.romfs).as_str())
 }
 
@@ -246,7 +249,7 @@ pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
         "lift" => libs_ok(p),
         "exe" => exe_ok(p),
         "textures" => textures_ok(p),
-        "harness" => p.harness().is_file(),
+        "harness" => p.harness().is_file() && shaders_ok(p),
         "shaders" => shaders_ok(p),
         "ini" => crate::settings::play_paths_ok(&p.game_dir, p),
         _ => false,
@@ -534,7 +537,7 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
     if !r.run("shaders", "Translating the shaders to SPIR-V", c, cwd)? {
         return Ok(false);
     }
-    let stamp = serde_json::json!({ "complete": true, "romfs": crate::dump::fwd(&p.romfs) });
+    let stamp = serde_json::json!({ "complete": true, "translator_version": SHADER_TRANSLATOR_VERSION, "romfs": crate::dump::fwd(&p.romfs) });
     fs::write(p.shader_stamp(), stamp.to_string()).map_err(|e| e.to_string())?;
     // the corpus is only the extractor's output for the translator: several GB the game never reads
     let _ = fs::remove_dir_all(p.corpus());
@@ -590,7 +593,7 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
             return Ok(false);
         }
     }
-    if !p.harness().is_file() {
+    if !p.harness().is_file() || !shaders_ok(p) {
         let staged = repo.join("tools").join("shaders").join("third_party").join("ryubing");
         if !staged.is_dir() {
             let src = std::env::var("RYUBING_DIR").map(PathBuf::from).unwrap_or_else(|_| repo.join("work").join("refs").join("ryubing"));

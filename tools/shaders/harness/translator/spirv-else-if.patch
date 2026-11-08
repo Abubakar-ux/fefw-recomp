@@ -6,6 +6,9 @@ checkout in private/third_party stays untouched. The Ryujinx code in the context
 
 --- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
 +++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+@@ -120,1 +120,2 @@
+                 info.IoDefinitions.Add(new IoDefinition(StorageKind.Input, IoVariable.SubgroupLaneId));
++                info.IoDefinitions.Add(new IoDefinition(StorageKind.Input, IoVariable.SubgroupSize));
 @@ -311,6 +311,33 @@
  
              context.LoopTargets = loopTargets;

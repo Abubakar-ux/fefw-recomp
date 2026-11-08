@@ -7,7 +7,7 @@ Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is n
 copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
 --- a/IntermediateRepresentation/IoVariable.cs
 +++ b/IntermediateRepresentation/IoVariable.cs
-@@ -28,6 +28,7 @@
+@@ -28,9 +28,11 @@
          PointSize,
          Position,
          PrimitiveId,
@@ -15,3 +15,7 @@ copy under the build folder; the checkout in third_party stays untouched. The Ry
          SubgroupEqMask,
          SubgroupGeMask,
          SubgroupGtMask,
++        SubgroupSize,
+         SubgroupLaneId,
+         SubgroupLeMask,
+         SubgroupLtMask,

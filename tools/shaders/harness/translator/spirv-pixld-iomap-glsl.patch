@@ -7,7 +7,7 @@ Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is n
 copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
 --- a/CodeGen/Glsl/Instructions/IoMap.cs
 +++ b/CodeGen/Glsl/Instructions/IoMap.cs
-@@ -41,6 +41,7 @@
+@@ -41,9 +41,11 @@
                  IoVariable.PointSize => ("gl_PointSize", AggregateType.FP32),
                  IoVariable.Position => ("gl_Position", AggregateType.Vector4 | AggregateType.FP32),
                  IoVariable.PrimitiveId => GetPrimitiveIdVariableName(definitions.Stage, isOutput),
@@ -15,3 +15,7 @@ copy under the build folder; the checkout in third_party stays untouched. The Ry
                  IoVariable.SubgroupEqMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Eq"),
                  IoVariable.SubgroupGeMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Ge"),
                  IoVariable.SubgroupGtMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Gt"),
++                IoVariable.SubgroupSize => ("gl_SubgroupSize", AggregateType.U32),
+                 IoVariable.SubgroupLaneId => GetSubgroupInvocationIdVariableName(hostCapabilities.SupportsShaderBallot),
+                 IoVariable.SubgroupLeMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Le"),
+                 IoVariable.SubgroupLtMask => GetSubgroupMaskVariableName(hostCapabilities.SupportsShaderBallot, "Lt"),

@@ -1893,7 +1893,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         static void EmitMatchAmpere(EmitterContext ctx, SassInst i)
         {
             // MATCH.ALL[.U64] [Pd,] Rd, Ra: Pd = every active lane has the same Ra (Ra pair for .U64); Rd = the active mask then, else 0
-            if (!Has(i, "ALL")) throw Unsup("MATCH.ANY");
+            if (!Has(i, "ALL") && !Has(i, "ANY")) throw Unsup("MATCH mode");
             IReadOnlyList<Op> o = i.Operands;
             int k = IsPredKind(o[0]) ? 1 : 0;
             Op ra = o[k + 1];
@@ -1901,6 +1901,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
             IrOperand mask = EmitBallot(ctx, Const(IrConsts.True));
             IrOperand first = ctx.FindLSB(mask);
             IrOperand lo = Src(ctx, ra);
+            if (Has(i, "ANY"))
+            {
+                // Each invocation gets the active lanes whose complete value matches its own.
+                IrOperand matches = Const(0);
+                IrOperand hi = Has(i, "U64") ? (ra.Reg < 254 ? Gpr(ra.Reg + 1) : Const(0)) : null;
+                for (int lane = 0; lane < 32; lane++)
+                {
+                    IrOperand same = ctx.ICompareEqual(lo, ReadLane(ctx, lo, Const(lane)));
+                    if (hi != null) same = ctx.BitwiseAnd(same, ctx.ICompareEqual(hi, ReadLane(ctx, hi, Const(lane))));
+                    IrOperand bit = ctx.BitwiseAnd(mask, Const(1 << lane));
+                    matches = ctx.BitwiseOr(matches, ctx.ConditionalSelect(same, bit, Const(0)));
+                }
+                Dst(ctx, o[k], matches);
+                return;
+            }
             IrOperand eq = ctx.ICompareEqual(lo, ReadLane(ctx, lo, first));
             if (Has(i, "U64"))
             {

@@ -7,7 +7,7 @@ Lowering: MY_INDEX reads gl_SampleID (BuiltIn SampleId; 0 when the pipeline is n
 copy under the build folder; the checkout in third_party stays untouched. The Ryujinx code in the context lines is MIT.
 --- a/CodeGen/Spirv/IoMap.cs
 +++ b/CodeGen/Spirv/IoMap.cs
-@@ -32,6 +32,7 @@
+@@ -32,9 +32,11 @@
                  IoVariable.PointSize => (BuiltIn.PointSize, AggregateType.FP32),
                  IoVariable.Position => (BuiltIn.Position, AggregateType.Vector4 | AggregateType.FP32),
                  IoVariable.PrimitiveId => (BuiltIn.PrimitiveId, AggregateType.S32),
@@ -15,3 +15,7 @@ copy under the build folder; the checkout in third_party stays untouched. The Ry
                  IoVariable.SubgroupEqMask => (BuiltIn.SubgroupEqMask, AggregateType.Vector4 | AggregateType.U32),
                  IoVariable.SubgroupGeMask => (BuiltIn.SubgroupGeMask, AggregateType.Vector4 | AggregateType.U32),
                  IoVariable.SubgroupGtMask => (BuiltIn.SubgroupGtMask, AggregateType.Vector4 | AggregateType.U32),
++                IoVariable.SubgroupSize => (BuiltIn.SubgroupSize, AggregateType.U32),
+                 IoVariable.SubgroupLaneId => (BuiltIn.SubgroupLocalInvocationId, AggregateType.U32),
+                 IoVariable.SubgroupLeMask => (BuiltIn.SubgroupLeMask, AggregateType.Vector4 | AggregateType.U32),
+                 IoVariable.SubgroupLtMask => (BuiltIn.SubgroupLtMask, AggregateType.Vector4 | AggregateType.U32),

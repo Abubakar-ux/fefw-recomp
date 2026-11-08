@@ -263,6 +263,9 @@ namespace SpirvHarness
         public bool QueryHostSupportsTextureShadowLod() => false;
         public bool QueryHostSupportsFragmentShaderInterlock() => false;   // S4d: no SPV_EXT_fragment_shader_interlock dependency (only the rare ordered-fragment shaders lose their ordering)
         public bool QueryHostSupportsShaderNonUniformIndexing() => true;
-        public int QueryHostSubgroupSize() => 32;
+        // Offline modules run on any Vulkan subgroup size. 128 selects Ryujinx's
+        // portable warp paths (four ballot words), not a required hardware size.
+        // Lane ID / base / ballot selection fold away on native 32-lane GPUs.
+        public int QueryHostSubgroupSize() => 128;
     }
 }

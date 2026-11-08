@@ -107,13 +107,12 @@ Put "$root\tools\shaders\licenses\LICENSE.Ryubing.MIT" 'licenses\LICENSE.Ryujinx
 
 # --- the shader translator, self-contained (no .NET install needed on the player's PC)
 $harness = Join-Path $Out 'harness'
-if (-not (Test-Path (Join-Path $harness 'spirv_harness.exe'))) {
-    Need "$root\tools\shaders\third_party\ryubing" 'staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1)'
-    # no debug info and no build paths in the published DLLs
-    dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness `
-        -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$root=."
-    if ($LASTEXITCODE) { throw 'dotnet publish failed' }
-}
+# Always rebuild: reusing Out/harness can silently ship an older translator after
+# the launcher invalidates the player's shader cache for a new translator version.
+Need "$root\tools\shaders\third_party\ryubing" 'staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1)'
+dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness `
+    -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$root=."
+if ($LASTEXITCODE) { throw 'dotnet publish failed' }
 Mirror $harness 'tools\spirv_harness' @('*.pdb')
 
 # --- Zig (the compiler for the lifted code on the player's PC)
