@@ -30,6 +30,9 @@ namespace {
 
 constexpr const char* kTag = "framegen";
 
+// DLSS-G reads viewport 0 at present (ProgrammingGuideDLSS_G, tagging checklist).
+// SR uses a separate viewport so its unflipped inputs/constants cannot replace ours.
+
 int fg_setting() {
     static const int v = [] {
         std::string m = config_get_str("dlss", "frame_gen", "0");
@@ -163,7 +166,7 @@ bool fg_init(State& s, gfx::Device* dev) {
     }
     if (!feature_fn(s, sl::kFeatureDLSS_G, "slDLSSGSetOptions", s.f.fg_set) || !feature_fn(s, sl::kFeatureDLSS_G, "slDLSSGGetState", s.f.fg_get)) return false;
     sl::DLSSGState gs;
-    if (s.f.fg_get(sl::ViewportHandle(1u), gs, nullptr) != sl::Result::eOk) {
+    if (s.f.fg_get(sl::ViewportHandle(0u), gs, nullptr) != sl::Result::eOk) {
         NXLOG_W(kTag, "DLSS-G state unavailable: frame generation off");
         return false;
     }
@@ -264,7 +267,7 @@ void set_mode(State& s, bool on) {
     o.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
     o.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
     o.onErrorCallback = &on_api_error;
-    const sl::Result r = s.f.fg_set(sl::ViewportHandle(1u), o);
+    const sl::Result r = s.f.fg_set(sl::ViewportHandle(0u), o);
     if (r != sl::Result::eOk) {
         NXLOG_E(kTag, "slDLSSGSetOptions failed (%d): frame generation off", static_cast<int>(r));
         s.fg = false;
@@ -387,7 +390,7 @@ void framegen_inputs(void* gfx_device, VkCommandBuffer cb, const FramegenInputs&
     c.motionVectors3D = sl::Boolean::eFalse;
     c.reset = in.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
     c.motionVectorsJittered = sl::Boolean::eFalse;
-    const sl::ViewportHandle vp(1u);
+    const sl::ViewportHandle vp(0u);
     sl::Result r = s.f.constants(c, *t, vp);
     if (r != sl::Result::eOk) {
         NXLOG_E(kTag, "slSetConstants failed (%d)", static_cast<int>(r));
@@ -423,7 +426,7 @@ void framegen_hudless(VkCommandBuffer cb, VkImage image, VkImageView view, VkFor
     r.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     const sl::Extent ext{0, 0, size.width, size.height};
     sl::ResourceTag tag(&r, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, &ext);
-    const sl::Result res = s.f.tag(*t, sl::ViewportHandle(1u), &tag, 1, reinterpret_cast<sl::CommandBuffer*>(cb));
+    const sl::Result res = s.f.tag(*t, sl::ViewportHandle(0u), &tag, 1, reinterpret_cast<sl::CommandBuffer*>(cb));
     static bool told = false;
     if (res != sl::Result::eOk && !told) {
         told = true;
@@ -496,7 +499,7 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
             sl::FrameToken* t = nullptr;
             const sl::Extent sub{static_cast<uint32_t>(rect[1]), static_cast<uint32_t>(rect[0]), static_cast<uint32_t>(rect[2]), static_cast<uint32_t>(rect[3])};
             sl::ResourceTag bt(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent, &sub);
-            if (s.f.token(t, &s.index) == sl::Result::eOk && t) s.f.tag(*t, sl::ViewportHandle(1u), &bt, 1, reinterpret_cast<sl::CommandBuffer*>(cb));
+            if (s.f.token(t, &s.index) == sl::Result::eOk && t) s.f.tag(*t, sl::ViewportHandle(0u), &bt, 1, reinterpret_cast<sl::CommandBuffer*>(cb));
         }
     }
     if (s.markers) {
@@ -532,7 +535,7 @@ void framegen_present_end() {
     if (s.fg) {
         uint32_t shown = 0;
         sl::DLSSGState gs;
-        if (s.f.fg_get(sl::ViewportHandle(1u), gs, nullptr) == sl::Result::eOk) {
+        if (s.f.fg_get(sl::ViewportHandle(0u), gs, nullptr) == sl::Result::eOk) {
             shown = gs.numFramesActuallyPresented;   // report measured presents, never invent a frame
             s.status = static_cast<uint32_t>(gs.status);
         }
@@ -568,7 +571,7 @@ void framegen_swapchain_reset() {
             {nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent},
             {nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent}};
         if (s.f.token(t, &s.index) == sl::Result::eOk && t)
-            s.f.tag(*t, sl::ViewportHandle(1u), tags, 4, nullptr);
+            s.f.tag(*t, sl::ViewportHandle(0u), tags, 4, nullptr);
     }
     s.streak = 0;
     s.inputs = false;

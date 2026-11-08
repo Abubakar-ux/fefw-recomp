@@ -90,6 +90,7 @@ void on_log(sl::LogType type, const char* msg) {
     while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
     if (type == sl::LogType::eError) NXLOG_E(kTag, "streamline: %s", m.c_str());
     else if (type == sl::LogType::eWarn) NXLOG_W(kTag, "streamline: %s", m.c_str());
+    else if (config_get_bool("dlss", "verbose", false)) NXLOG_I(kTag, "streamline: %s", m.c_str());
 }
 
 sl::Resource resource(const TemporalImage& t) {
@@ -120,7 +121,8 @@ public:
     bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
         Sl& s = sl_state();
         if (failed_) return false;
-        const sl::ViewportHandle vp(0u);
+        // DLSS-G consumes viewport 0 at present; keep SR tags/constants separate.
+        const sl::ViewportHandle vp(framegen_dlss() ? 1u : 0u);
         sl::FrameToken* frame = static_cast<sl::FrameToken*>(sl_frame_token());
         if (!frame) return fail("slGetNewFrameToken");
         // The mode: kept while the input size stays in its dynamic range (the game may change its render size per frame), else the one
@@ -312,7 +314,7 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
     }
     sl::Preferences pref;
     pref.showConsole = false;
-    pref.logLevel = sl::LogLevel::eDefault;
+    pref.logLevel = config_get_bool("dlss", "verbose", false) ? sl::LogLevel::eVerbose : sl::LogLevel::eDefault;
     pref.pathsToPlugins = paths;
     pref.numPathsToPlugins = 1;
     pref.pathToLogsAndData = nullptr;
