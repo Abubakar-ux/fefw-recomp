@@ -285,6 +285,7 @@ VkImageView dummy_storage_view(VkImageViewType type, VkFormat format);
 VkImageView tex_present_view(Texture* t);
 // Dummy 1x1 views used when a binding cannot be resolved: black texture of the requested type.
 VkImageView dummy_view(VkImageViewType type, bool depth_compare);
+VkImageView dummy_view(VkImageViewType type, bool depth_compare, int component);
 VkSampler dummy_sampler();
 // Sampler for the NVN sampler state (cached forever). Never null.
 VkSampler sampler_for(const SamplerInfo& s);

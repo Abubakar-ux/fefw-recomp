@@ -51,6 +51,8 @@ void settings_menu(play::UiHost& host, gfx::Overlay& overlay);
 
 // fefw_res.cpp: [fefw] output / render_ratio / render / shadow_size / quality (the render configs, notes/resolution.md)
 void res_install(uint64_t base);
+// The render-target pool's allocator was given room past the pool ([fefw] rt_pool_overflow_mb): renders above half of a 2160p output fit.
+bool res_rt_pool_extended();
 
 // fefw_prompts.cpp: the button glyphs of the game's text follow the controller in use ([prompts] style; notes/prompts.md)
 void prompts_install(play::GameHost* host);

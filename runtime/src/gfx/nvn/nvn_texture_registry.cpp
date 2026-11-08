@@ -4,6 +4,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -16,19 +17,44 @@
 
 namespace nxrt::nvn::be {
 namespace {
+using OverflowKey = std::pair<const MemoryPool*, int64_t>;
 std::mutex g_mu;
 std::multimap<uint64_t, Texture*> g_by_start;   // storage start -> texture
 std::vector<Texture*> g_virtual;                // sparse textures
+std::multimap<OverflowKey, Texture*> g_overflow;   // host-backed textures: (pool, offset) -> texture
+
+OverflowKey overflow_key(const Texture* t) { return {t->overflow_pool, t->overflow_offset}; }
+
+// The same shape: the image made for one serves the other.
+bool same_shape(const Texture* o, const Texture* t) {
+    return o->storage_size == t->storage_size && o->levels == t->levels && o->layers == t->layers && o->fmt == t->fmt && o->block_linear == t->block_linear &&
+           o->block_height_gobs == t->block_height_gobs && o->b.target == t->b.target && o->b.width == t->b.width && o->b.height == t->b.height &&
+           o->b.depth == t->b.depth && o->b.samples == t->b.samples;
+}
 }  // namespace
 
 void texture_registry_add(Texture* t) {
-    if (!t || !t->mem) return;
+    if (!t) return;
+    if (t->overflow) {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_overflow.emplace(overflow_key(t), t);
+        return;
+    }
+    if (!t->mem) return;
     std::lock_guard<std::mutex> lk(g_mu);
     g_by_start.emplace(reinterpret_cast<uint64_t>(t->mem), t);
 }
 
 void texture_registry_remove(Texture* t) {
-    if (!t || !t->mem) return;
+    if (!t) return;
+    if (t->overflow) {
+        std::lock_guard<std::mutex> lk(g_mu);
+        auto r = g_overflow.equal_range(overflow_key(t));
+        for (auto it = r.first; it != r.second; ++it)
+            if (it->second == t) { g_overflow.erase(it); break; }
+        return;
+    }
+    if (!t->mem) return;
     std::lock_guard<std::mutex> lk(g_mu);
     auto r = g_by_start.equal_range(reinterpret_cast<uint64_t>(t->mem));
     for (auto it = r.first; it != r.second; ++it)
@@ -220,23 +246,30 @@ void texture_registry_detach_gpu() {
     std::lock_guard<std::mutex> lk(g_mu);
     for (auto& kv : g_by_start) kv.second->gpu = nullptr;
     for (Texture* t : g_virtual) t->gpu = nullptr;
+    for (auto& kv : g_overflow) kv.second->gpu = nullptr;
 }
 
 Ref<Texture> texture_registry_find_alias(const Texture* t) {
-    if (!t || !t->mem || t->is_display) return Ref<Texture>();
+    if (!t || t->is_display) return Ref<Texture>();
+    const bool ovf = t->overflow;
+    if (ovf ? t->overflow_offset < 0 : !t->mem) return Ref<Texture>();   // offset -1 names no storage
     std::lock_guard<std::mutex> lk(g_mu);
-    auto r = g_by_start.equal_range(reinterpret_cast<uint64_t>(t->mem));
-    for (auto it = r.first; it != r.second; ++it) {
-        Texture* o = it->second;
-        if (o == t || o->destroyed.load() || !o->gpu) continue;
-        if (o->storage_size != t->storage_size || o->levels != t->levels || o->layers != t->layers || o->fmt != t->fmt || o->block_linear != t->block_linear ||
-            o->block_height_gobs != t->block_height_gobs || o->b.target != t->b.target || o->b.width != t->b.width || o->b.height != t->b.height ||
-            o->b.depth != t->b.depth || o->b.samples != t->b.samples)
-            continue;
-        o->ref();
-        return Ref<Texture>(o);
+    auto check = [t](Texture* o) { return o != t && !o->destroyed.load() && o->gpu && same_shape(o, t); };
+    if (ovf) {
+        auto r = g_overflow.equal_range(overflow_key(t));
+        for (auto it = r.first; it != r.second; ++it)
+            if (check(it->second)) { it->second->ref(); return Ref<Texture>(it->second); }
+        return Ref<Texture>();
     }
+    auto r = g_by_start.equal_range(reinterpret_cast<uint64_t>(t->mem));
+    for (auto it = r.first; it != r.second; ++it)
+        if (check(it->second)) { it->second->ref(); return Ref<Texture>(it->second); }
     return Ref<Texture>();
+}
+
+size_t texture_registry_overflow_size() {
+    std::lock_guard<std::mutex> lk(g_mu);
+    return g_overflow.size();
 }
 
 void textures_mark_override_candidates_dirty() {
@@ -309,10 +342,12 @@ struct RegistryGauges {
             std::lock_guard<std::mutex> lk(g_mu);
             return static_cast<int64_t>(g_virtual.size());
         });
+        nxrt::gauge_register("nvn.texture_registry.overflow", [] { return static_cast<int64_t>(texture_registry_overflow_size()); });
     }
     ~RegistryGauges() {
         nxrt::gauge_unregister("nvn.texture_registry");
         nxrt::gauge_unregister("nvn.texture_registry.virtual");
+        nxrt::gauge_unregister("nvn.texture_registry.overflow");
     }
 };
 RegistryGauges g_registry_gauges;

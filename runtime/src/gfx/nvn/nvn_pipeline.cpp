@@ -25,6 +25,7 @@
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_spirv_patch.h"
+#include "nvn_subgroup.h"
 #include "vk_gauges.h"
 #include "extras/hdr_nvn.h"
 #include "nxrt/extras.h"
@@ -50,6 +51,7 @@ struct SharedLayout { VkDescriptorSetLayout sets[5] = {}; VkPipelineLayout layou
 std::map<std::string, SharedLayout> g_shared_layouts;
 std::unordered_map<const ShaderInfo*, VkShaderModule> g_modules;
 std::mutex g_module_id_mu;
+std::unordered_map<VkShaderModule, SubgroupShader> g_module_subgroups;
 std::unordered_map<VkShaderModule, uint64_t> g_module_ids;   // every module create_module made: the hash of its words (module_content_id)
 std::atomic<uint64_t> g_built_at_draw{0};                    // whole pipelines built by the render thread at a draw
 std::atomic<bool> g_cache_dirty{false};
@@ -246,7 +248,11 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
     for (uint32_t w : *code) id = (id ^ w) * 1099511628211ull;
     {
         std::lock_guard<std::mutex> lk(g_module_id_mu);
-        g_module_ids[m] = id;
+        const auto subgroup = subgroup_shader(*code);
+        // GPL keys include the guest subgroup policy. Capabilities are immutable
+        // for the lifetime of these device-local caches.
+        g_module_ids[m] = subgroup.used ? id ^ 0x6775657374333201ull : id;
+        g_module_subgroups[m] = subgroup;
     }
     return m;
 }
@@ -590,6 +596,24 @@ void note_pipeline_created(double ms, const char* what) {
     NXLOG_D(kTag, "%s created in %.1f ms", what, ms);
 }
 
+void configure_guest_subgroup(VkPipelineShaderStageCreateInfo& stage,
+                              VkPipelineShaderStageRequiredSubgroupSizeCreateInfo& size) {
+    SubgroupShader shader;
+    {
+        std::lock_guard<std::mutex> lk(g_module_id_mu);
+        auto it = g_module_subgroups.find(stage.module);
+        if (it == g_module_subgroups.end()) return;
+        shader = it->second;
+    }
+    if (!shader.used) return;
+    if (!require_guest_subgroup(stage, size, shader, device().features(), device().limits_ext())) {
+        static std::atomic<uint32_t> warned{0};
+        if (!(warned.fetch_or(stage.stage) & stage.stage))
+            NXLOG_W(kTag, "cannot require guest subgroup size 32 for stage 0x%x (device support or compute workgroup limit); native size %u",
+                    stage.stage, device().limits_ext().subgroup_size);
+    }
+}
+
 VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
     const auto t0 = std::chrono::steady_clock::now();
@@ -769,6 +793,8 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout) {
         ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         ci.stage.module = m;
         ci.stage.pName = "main";
+        VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size{};
+        configure_guest_subgroup(ci.stage, subgroup_size);
         ci.layout = layout.layout;
         const uint64_t tp0 = nxrt::hitch_ticks();
         const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
@@ -1372,6 +1398,7 @@ void module_cache_clear() {
     g_xfb_mod.clear();
     std::lock_guard<std::mutex> lk2(g_module_id_mu);
     g_module_ids.clear();
+    g_module_subgroups.clear();
 }
 
 uint64_t module_content_id(VkShaderModule m) {
@@ -1423,6 +1450,11 @@ void pipeline_shutdown() {
     for (auto& [k, v] : g_xfb_mod)
         if (v.first) vkDestroyShaderModule(d, v.first, nullptr);
     g_xfb_mod.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_module_id_mu);
+        g_module_ids.clear();
+        g_module_subgroups.clear();
+    }
     for (auto& [k, b] : g_const_bufs) device().destroy_buffer(b.first);
     g_const_bufs.clear();
     g_const_n.sub(g_const_n.get());

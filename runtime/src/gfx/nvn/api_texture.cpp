@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 
+#include "nxrt/config.h"
 #include "nxrt/log.h"
 #include <cstring>
 #include <vector>
@@ -195,6 +196,31 @@ void read_texels(const Target& r, const NVNcopyRegion& g, uint8_t* dst, int64_t 
     else read_linear(r, g, dst, row, image);
 }
 
+// ---- host-backed storage ------------------------------------------------------------------------------------------------------
+// A texture whose storage does not lie inside its pool's memory: past the end (a game whose allocator was given more than the pool,
+// games/fefw/fefw_res.cpp) or at offset -1 (its allocator found no room). The game's memory has no bytes for it, but the GPU never reads
+// textures from there: every texture is a Vulkan image of its own, and the pool's bytes only carry what the CPU writes into the image
+// (uploads) and what the GPU wrote back for the CPU to read (nvnTextureReadTexels / InvalidateTexels). In a pool the CPU cannot access
+// (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS: render targets, the shadow maps, the window textures, which are presented from their image) neither
+// happens, so the image alone is the texture (Texture::overflow). Why it cannot be one: null when it can.
+const char* overflow_refusal(const MemoryPool& pool, const TextureBuilderInfo& info) {
+    // [nvn] texture_overflow = 0: such a texture is not created (as before).
+    static const bool on = nxrt::config_get_bool("nvn", "texture_overflow", true);
+    if (!on) return "[nvn] texture_overflow is off";
+    if (!(pool.flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return "the CPU can access the pool, so the storage must be the game's memory";
+    if (info.target == NVN_TEXTURE_TARGET_BUFFER) return "a buffer texture reads its texels from the pool's memory";
+    return nullptr;
+}
+
+nxrt::GaugeCounter g_textures_overflow("nvn.textures_overflow");               // live host-backed textures
+nxrt::GaugeCounter g_textures_overflow_bytes("nvn.textures_overflow.bytes");   // their storage size (the images are about that size)
+
+void overflow_gone(const Texture* t) {
+    if (!t || !t->overflow) return;
+    g_textures_overflow.sub(1);
+    g_textures_overflow_bytes.sub(static_cast<int64_t>(t->storage_size));
+}
+
 // ---- entry points ---------------------------------------------------------------------------------------------------------
 NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* builder) {
     if (!texture || !builder) return 0;
@@ -210,22 +236,52 @@ NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* bu
     if (!L.valid) return fail("no layout for this target/format/size");
     MemoryPool* pool = be::host_of<MemoryPool>(info.pool);
     if (!pool) return fail("no pool, or a pool that is not ours");
+    bool overflow = false;
     if (!pool->is_virtual && (info.offset < 0 || static_cast<uint64_t>(info.offset) + L.storage_size > pool->size)) {
-        static std::atomic<int> s_size_logs{0};
-        if (s_size_logs.fetch_add(1) < 16)
-            NXLOG_W("nvn", "nvnTextureInitialize: storage 0x%llx at offset 0x%llx, pool size 0x%llx (pool flags 0x%x, texture flags 0x%x, levels %d, samples %d)",
-                    static_cast<unsigned long long>(L.storage_size), static_cast<unsigned long long>(info.offset), static_cast<unsigned long long>(pool->size),
-                    static_cast<unsigned>(pool->flags), static_cast<unsigned>(info.flags), info.levels, info.samples);
-        return fail("storage does not fit in the pool");
+        const char* refused = overflow_refusal(*pool, info);
+        if (refused) {
+            static std::atomic<int> s_size_logs{0};
+            if (s_size_logs.fetch_add(1) < 16)
+                NXLOG_W("nvn", "nvnTextureInitialize: storage 0x%llx at offset 0x%llx, pool size 0x%llx (pool flags 0x%x, texture flags 0x%x, levels %d, samples %d): "
+                               "not host-backed: %s",
+                        static_cast<unsigned long long>(L.storage_size), static_cast<unsigned long long>(info.offset), static_cast<unsigned long long>(pool->size),
+                        static_cast<unsigned>(pool->flags), static_cast<unsigned>(info.flags), info.levels, info.samples, refused);
+            return fail("storage does not fit in the pool");
+        }
+        overflow = true;
+        if (info.offset < 0) {   // the game's own allocator failed: no identity for the storage (logged once)
+            static std::atomic<bool> s_neg{false};
+            if (!s_neg.exchange(true))
+                NXLOG_W("nvn", "nvnTextureInitialize: the game placed a %dx%d texture (format %d, 0x%llx bytes) at offset %lld of a pool of 0x%llx bytes (flags 0x%x; "
+                               "its allocator found no room): host-backed, but texture objects the game makes over the same storage cannot share its image "
+                               "(first case; later ones are not logged)",
+                        info.width, info.height, info.format, static_cast<unsigned long long>(L.storage_size), static_cast<long long>(info.offset),
+                        static_cast<unsigned long long>(pool->size), static_cast<unsigned>(pool->flags));
+        } else {
+            static std::atomic<int> s_ovf_logs{0};
+            if (s_ovf_logs.fetch_add(1) < 16)
+                NXLOG_I("nvn", "nvnTextureInitialize: %dx%dx%d texture (format %d, %d levels, 0x%llx bytes) at offset 0x%llx, past the end of its pool (0x%llx bytes, "
+                               "flags 0x%x): host-backed (GPU memory of its own)",
+                        info.width, info.height, info.depth, info.format, info.levels, static_cast<unsigned long long>(L.storage_size),
+                        static_cast<unsigned long long>(info.offset), static_cast<unsigned long long>(pool->size), static_cast<unsigned>(pool->flags));
+        }
     }
 
     Texture* t = new Texture();
     t->b = info;
     t->fmt = L.fmt;
-    t->mem = (pool->base && !pool->is_virtual) ? pool->base + info.offset : nullptr;
+    t->mem = (pool->base && !pool->is_virtual && !overflow) ? pool->base + info.offset : nullptr;
     if (pool->is_virtual) {
         t->vpool = be::Ref<MemoryPool>::share(pool);
         t->voffset = static_cast<uint64_t>(std::max<ptrdiff_t>(0, info.offset));
+    }
+    if (overflow) {
+        t->overflow = true;
+        t->overflow_pool = pool;
+        t->overflow_offset = info.offset < 0 ? -1 : static_cast<int64_t>(info.offset);
+        t->cpu_dirty.store(false);   // nothing in the game's memory to upload
+        g_textures_overflow.add(1);
+        g_textures_overflow_bytes.add(static_cast<int64_t>(L.storage_size));
     }
     t->storage_size = L.storage_size;
     t->block_linear = L.block_linear;
@@ -241,6 +297,7 @@ NVNboolean nvnTextureInitialize(NVNtexture* texture, const NVNtextureBuilder* bu
     if (Texture* old = tex_of(texture)) {                    // initialized twice: the old one goes
         be::texture_registry_remove(old);
         be::texture_registry_remove_virtual(old);
+        overflow_gone(old);
         old->destroyed.store(true);
         gpu::release_texture_gpu(old);
     }
@@ -262,6 +319,7 @@ void nvnTextureFinalize(NVNtexture* texture) {
     gpu::release_texture_gpu(t);
     be::texture_registry_remove(t);
     be::texture_registry_remove_virtual(t);
+    overflow_gone(t);
     g_textures.sub(1);
     be::unbind_guest(texture);
 }
@@ -472,7 +530,13 @@ NVNboolean nvnTextureCompare(const NVNtexture* a, const NVNtexture* b) {
     Texture* y = tex_of(b);
     if (!x || !y) return a == b ? 1 : 0;
     if (x == y) return 1;
-    if (!x->mem || x->mem != y->mem || x->storage_size != y->storage_size) return 0;
+    if (x->overflow || y->overflow) {   // host-backed: the same storage is the same pool and offset (offset -1 names none)
+        if (!x->overflow || !y->overflow || x->overflow_offset < 0 || x->overflow_pool != y->overflow_pool || x->overflow_offset != y->overflow_offset ||
+            x->storage_size != y->storage_size)
+            return 0;
+    } else if (!x->mem || x->mem != y->mem || x->storage_size != y->storage_size) {
+        return 0;
+    }
     const TextureBuilderInfo& p = x->b;
     const TextureBuilderInfo& q = y->b;
     return (p.format == q.format && p.target == q.target && p.width == q.width && p.height == q.height && p.depth == q.depth &&

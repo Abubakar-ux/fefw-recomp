@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Low-latency modes (include/nxrt/lowlat.h): NVIDIA Reflex (VK_NV_low_latency2) and AMD Anti-Lag 2 (VK_AMD_anti_lag).
 #include "nxrt/lowlat.h"
+#include "extras/temporal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -181,6 +182,11 @@ LowLatency::LowLatency(gfx::Device& dev) : impl_(new Impl) {
     s.dev = &dev;
     s.cap_fps = g_cap_fps.load();
     s.cfg = settings().latency;
+    if (extras::streamline_framegen_available()) {
+        if (s.cfg.mode != LatencyMode::Off)
+            NXLOG_I(kTag, "DLSS-G owns Reflex: disabling the runtime latency backend");
+        s.cfg.mode = LatencyMode::Off;
+    }
     const gfx::DeviceFeatures& f = dev.features();
     if (s.cfg.mode != LatencyMode::Off) {
         if (f.low_latency2) { s.reflex = true; backend_ = Backend::Reflex; }

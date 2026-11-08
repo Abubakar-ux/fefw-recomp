@@ -22,6 +22,7 @@
 #include "nxrt/log.h"
 #include "nxrt/platform.h"
 #include "vk_gauges.h"
+#include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
 #include "extras/temporal.h"
 
@@ -345,7 +346,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     std::string gpu_want = !desc.gpu.empty() ? desc.gpu : config_get_str("gfx", "gpu", "");
 
     // DLSS / DLAA: Streamline must see the instance, device and swapchain calls, so the loader functions come from sl.interposer.dll
-    if (PFN_vkGetInstanceProcAddr sl_gipa = extras::streamline_preinit()) volkInitializeCustom(sl_gipa);
+    const PFN_vkGetInstanceProcAddr sl_gipa = extras::streamline_preinit();
+    if (sl_gipa) volkInitializeCustom(sl_gipa);
     else if (volkInitialize() != VK_SUCCESS) return fail("no Vulkan loader found (vulkan-1.dll)");
     uint32_t inst_version = 0;
     vkEnumerateInstanceVersion(&inst_version);
@@ -433,10 +435,25 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     if (debug_utils_) vkCreateDebugUtilsMessengerEXT(instance_, &dbg, nullptr, &messenger_);
 
     if (!headless) {
-        uint64_t s = 0;
-        if (!platform::create_vulkan_surface(instance_, &s)) return fail("could not create the Vulkan surface for the window");
-        surface_ = reinterpret_cast<VkSurfaceKHR>(s);
-        owns_platform_surface_ = true;
+#ifdef _WIN32
+        if (sl_gipa) {
+            // SDL loads vulkan-1.dll independently. DLSS-G must see the HWND/surface association.
+            VkWin32SurfaceCreateInfoKHR ci = {VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+            ci.hwnd = static_cast<HWND>(platform::native_hwnd());
+            ci.hinstance = static_cast<HINSTANCE>(platform::native_hinstance());
+            if (!ci.hwnd || !ci.hinstance || !vkCreateWin32SurfaceKHR)
+                return fail("missing Win32 window properties or interposed surface entry point");
+            r = vkCreateWin32SurfaceKHR(instance_, &ci, nullptr, &surface_);
+            if (r != VK_SUCCESS) return fail("interposed vkCreateWin32SurfaceKHR failed (" + std::to_string(r) + ")");
+            NXLOG_I(kTag, "window surface created through Streamline");
+        } else
+#endif
+        {
+            uint64_t s = 0;
+            if (!platform::create_vulkan_surface(instance_, &s)) return fail("could not create the Vulkan surface for the window");
+            surface_ = reinterpret_cast<VkSurfaceKHR>(s);
+            owns_platform_surface_ = true;
+        }
     }
 
     // physical devices
@@ -530,6 +547,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     NXLOG_I(kTag, "using GPU %zu: %s%s", pick, gpus_[pick].name.c_str(), gpu_want.empty() ? " (default rule)" : " (override)");
     vkGetPhysicalDeviceProperties(physical_, &props_);
 
+    extras::streamline_check_framegen(physical_);   // before device/swapchain hooks can allocate FG resources
+
     // features: the NVN back end wants everything the GPU offers (translated Maxwell shaders use Float64, subgroup operations,
     // DrawParameters, image gather, non-uniform indexing, geometry stages ...), so the device is created with every core 1.0
     // to 1.3 feature that is available (except robustBufferAccess) plus the extension features below.
@@ -622,6 +641,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.depth_clamp = af.depthClamp;
     features_.fill_mode_non_solid = af.fillModeNonSolid;
     features_.timeline_semaphore = a12.timelineSemaphore;
+    features_.subgroup_size_control = a13.subgroupSizeControl;
+    features_.compute_full_subgroups = a13.computeFullSubgroups;
     features_.dynamic_rendering = true;
     features_.synchronization2 = true;
     features_.geometry_shader = af.geometryShader;
@@ -691,6 +712,13 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         vkGetPhysicalDeviceProperties2(physical_, &pp);
         limits_.min_imported_host_alignment = features_.external_memory_host ? xh.minImportedHostPointerAlignment : 0;
         limits_.max_buffer_size = p13.maxBufferSize;
+        limits_.min_subgroup_size = p13.minSubgroupSize;
+        limits_.max_subgroup_size = p13.maxSubgroupSize;
+        limits_.max_compute_workgroup_subgroups = p13.maxComputeWorkgroupSubgroups;
+        limits_.required_subgroup_size_stages = p13.requiredSubgroupSizeStages;
+        NXLOG_I(kTag, "subgroup: native %u, range %u..%u, required stages 0x%x, size control %u, full compute %u, max workgroup subgroups %u",
+                p11.subgroupSize, p13.minSubgroupSize, p13.maxSubgroupSize, p13.requiredSubgroupSizeStages,
+                a13.subgroupSizeControl, a13.computeFullSubgroups, p13.maxComputeWorkgroupSubgroups);
         limits_.subgroup_size = p11.subgroupSize;
         limits_.subgroup_ops = p11.subgroupSupportedOperations;
         limits_.max_memory_allocation_count = props_.limits.maxMemoryAllocationCount;
@@ -725,6 +753,13 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     dci.ppEnabledExtensionNames = dev_exts.data();
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
+    if (sl_gipa) {
+        // Resolve the device loader from the interposer itself. Do not let device loading
+        // replace the swapchain hooks with driver pointers (including on recreation).
+        auto sl_gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(extras::streamline_proc("vkGetDeviceProcAddr"));
+        if (!sl_gdpa) return fail("Streamline has no vkGetDeviceProcAddr");
+        vkGetDeviceProcAddr = sl_gdpa;
+    }
     volkLoadDevice(device_);
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     if (fg_queues) extras::ffx_fg_install(*this, fg_queues);
@@ -767,9 +802,14 @@ Device::~Device() {
         if (impl_->once_pool) { vkDestroyCommandPool(device_, impl_->once_pool, nullptr); vk_gauge_command_pools().sub(1); }
     }
     unregister_vma_gauges();   // before the allocator goes: the gauges read it (the registry lock makes this wait for a running read)
+    extras::framegen_shutdown(this);
     if (vma_) vmaDestroyAllocator(vma_);
+    extras::streamline_shutdown();
     if (device_) vkDestroyDevice(device_, nullptr);
-    if (surface_ && owns_platform_surface_) platform::destroy_vulkan_surface(instance_, reinterpret_cast<uint64_t>(surface_));
+    if (surface_) {
+        if (owns_platform_surface_) platform::destroy_vulkan_surface(instance_, reinterpret_cast<uint64_t>(surface_));
+        else vkDestroySurfaceKHR(instance_, surface_, nullptr);
+    }
     if (messenger_) vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
     if (instance_) vkDestroyInstance(instance_, nullptr);
     delete impl_;

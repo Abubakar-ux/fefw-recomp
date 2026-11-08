@@ -17,6 +17,7 @@
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/platform.h"
+#include "extras/framegen.h"
 #include "extras/hdr_capture.h"
 #include "extras/hdr_math.h"
 #include "extras/win_display.h"
@@ -494,6 +495,7 @@ struct Renderer::Impl {
             ci.pNext = &fse;
         }
 #endif
+        extras::framegen_swapchain_reset();
         VkSwapchainKHR fresh = VK_NULL_HANDLE;
         VkResult r = vkCreateSwapchainKHR(vk(), &ci, nullptr, &fresh);
         if (r == VK_SUCCESS) vk_gauge_swapchains().add(1);
@@ -595,6 +597,7 @@ struct Renderer::Impl {
         }
         slots.clear();
         destroy_targets();
+        extras::framegen_swapchain_reset();
         if (swapchain) { vkDestroySwapchainKHR(vk(), swapchain, nullptr); vk_gauge_swapchains().sub(1); }
         swapchain = VK_NULL_HANDLE;
     }

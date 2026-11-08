@@ -72,6 +72,7 @@ struct TexGpu {
     float scale = 1.0f;                                 // resolution scale: base is the NVN size times this ([gfx] render_scale, render targets only)
     bool scale_blocked = false;                         // was scaled, brought back to 1 (bound as a storage image, or paired with an unscaled target)
     std::map<std::array<uint32_t, 12>, VkImageView> views;
+    std::map<VkFormat, bool> sampled_formats;
     std::array<uint32_t, 12> last_key = {};             // view_for's last answer (render thread): most lookups repeat it (rt agent)
     VkImageView last_view = VK_NULL_HANDLE;
     int refs = 1;                                      // texture objects over the same storage share one image (render thread)
@@ -1038,14 +1039,16 @@ struct Shared {
     std::map<uint64_t, std::vector<std::pair<SamplerInfo, VkSampler>>> samplers;
     VkSampler dummy_sampler = VK_NULL_HANDLE;
     Dummy color[6];
+    Dummy sint[6], uint[6];
     Dummy depth[6];
     std::map<std::pair<int, int>, Dummy> storage;   // (view type, format): GENERAL-layout 1x1 storage images
 };
 Shared g_sh;
 
-bool make_dummy(Dummy& d, VkImageViewType type, bool depth) {
+bool make_dummy(Dummy& d, VkImageViewType type, bool depth, int component) {
     d.tried = true;
-    const VkFormat fmt = depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
+    const VkFormat fmt = depth ? VK_FORMAT_D32_SFLOAT : component == 2 ? VK_FORMAT_R8G8B8A8_SINT :
+                         component == 3 ? VK_FORMAT_R8G8B8A8_UINT : VK_FORMAT_R8G8B8A8_UNORM;
     gfx::ImageDesc id;
     id.format = fmt;
     id.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1666,6 +1669,12 @@ void tex_ensure_current(Texture* t, Frame& f) {
     TexGpu* g = tex_or_null(t);
     if (!g || g->depth) return;
     if (t->b.samples > 1 || target_is_multisample(t->b.target)) return;   // multisampled images are only ever rendered
+    if (t->overflow) {   // host-backed storage (nvn_core.h): no bytes in the game's memory; the image starts cleared, then only the GPU writes it
+        t->cpu_dirty.store(false);
+        if (!g->uploaded && !g->gpu_written) fill_zero(f, *g);
+        g->uploaded = true;
+        return;
+    }
     // A coherent texture the CPU rewrites every frame (Pokopia: three 1024x1024 RGBA8 textures in turn) cost one write-watch fault per 4 KiB
     // page per rewrite (~3500 a second on the main thread, inside the game's writes) because each upload armed its pages again. Once its CPU
     // uploads come kStreamGap presents apart or closer kStreamAfter times in a row, and the GPU untile path takes it, it is "streamed": never
@@ -1915,8 +1924,10 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
             return bad_view(*t, "1D views are not supported (the image is 2D with height 1)");
     }
     VkFormat fmt = req.format == VK_FORMAT_UNDEFINED ? g->format : promoted_view_format(*g, req.format);
-    if (req.component != 0 && g->mutable_fmt && fmt == g->format) {
+    if (req.component != 0 && g->mutable_fmt) {
         // The shader's sampled type decides how the bits read: float shaders over an integer texture (and the reverse) see the raw bits.
+        // Apply this to explicit NVN views too. A UINT view of float storage is compatible with
+        // the image, but not with the pool's float OpTypeImage (VUID-format-07753).
         const VkFormat a = req.component == 1 ? float_alias(fmt) : req.component == 2 ? sint_alias(fmt) : uint_alias(fmt);
         if (a != VK_FORMAT_UNDEFINED && format_view_ok(*g, a)) fmt = a;
     }
@@ -1928,6 +1939,20 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     }
     VkImageAspectFlags asp = g->aspect;
     if (g->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) asp = req.depth_aspect ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
+    const int component = asp == VK_IMAGE_ASPECT_STENCIL_BIT ? 3 :
+                          vk_format_is_integer(fmt) ? (vk_format_is_signed_int(fmt) ? 2 : 3) : 1;
+    if (req.component && req.component != component) return bad_view(*t, "sampled numeric type does not match the shader");
+    if (req.depth_compare && !(asp & VK_IMAGE_ASPECT_DEPTH_BIT)) return bad_view(*t, "depth comparison needs a depth aspect");
+    // Check the actual alias format, rather than only the image's original format. view_for
+    // can restrict inherited usages, but a descriptor must still have sampled-image usage.
+    // Cache per image/device; this is also called for every pool descriptor refresh.
+    auto [feature, inserted] = g->sampled_formats.try_emplace(fmt, false);
+    if (inserted) {
+        VkFormatProperties fp = {};
+        vkGetPhysicalDeviceFormatProperties(device().physical(), fmt, &fp);
+        feature->second = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    }
+    if (!feature->second) return bad_view(*t, "view format does not support sampling");
     return view_for(*g, req.type, bl, nl, bly, nly, fmt, asp, req.swizzle);
 }
 
@@ -1973,10 +1998,12 @@ VkImageView tex_present_view(Texture* t) {
     return view_for(*g, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, fmt, g->aspect, kIdentity);
 }
 
-VkImageView dummy_view(VkImageViewType type, bool depth_compare) {
+VkImageView dummy_view(VkImageViewType type, bool depth_compare) { return dummy_view(type, depth_compare, 1); }
+
+VkImageView dummy_view(VkImageViewType type, bool depth_compare, int component) {
     const int idx = dummy_index(type);
-    Dummy& d = (depth_compare ? g_sh.depth : g_sh.color)[idx];
-    if (!d.tried) make_dummy(d, kDummyTypes[idx], depth_compare);
+    Dummy& d = (depth_compare ? g_sh.depth : component == 2 ? g_sh.sint : component == 3 ? g_sh.uint : g_sh.color)[idx];
+    if (!d.tried) make_dummy(d, kDummyTypes[idx], depth_compare, component);
     return d.view;
 }
 
@@ -2145,7 +2172,7 @@ void tex_shutdown() {
         if (kv.second.view != VK_NULL_HANDLE) { vkDestroyImageView(vkdev(), kv.second.view, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(kv.second.img);
     }
-    for (Dummy* set : {g_sh.color, g_sh.depth}) {
+    for (Dummy* set : {g_sh.color, g_sh.depth, g_sh.sint, g_sh.uint}) {
         for (int i = 0; i < 6; ++i) {
             if (set[i].view != VK_NULL_HANDLE) { vkDestroyImageView(vkdev(), set[i].view, nullptr); vk_gauge_image_views().sub(1); }
             device().destroy_image(set[i].img);
@@ -2549,6 +2576,11 @@ VkBufferView tex_buffer_view(Texture* t, const TextureViewInfo* view, int compon
     if (component != 0) {
         const VkFormat a = component == 1 ? float_alias(fmt) : component == 2 ? sint_alias(fmt) : uint_alias(fmt);
         if (a != VK_FORMAT_UNDEFINED) fmt = a;
+        const int actual = vk_format_is_integer(fmt) ? (vk_format_is_signed_int(fmt) ? 2 : 3) : 1;
+        if (actual != component) {
+            bad_view(*t, "texel buffer numeric type does not match the shader");
+            return VK_NULL_HANDLE;
+        }
     }
     if (!buffer_format_ok(fmt, storage)) return VK_NULL_HANDLE;
     uint64_t addr = 0;

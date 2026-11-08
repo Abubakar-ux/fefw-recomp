@@ -21,6 +21,7 @@
 #include "nvn_impl.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/nvn_backend.h"
 
 namespace nxrt::nvn {
 using namespace be;
@@ -555,6 +556,14 @@ void register_api_memory() {
     NVN_REG(nvnSamplerPoolGetMemoryPool);
     NVN_REG(nvnSamplerPoolGetMemoryOffset);
     NVN_REG(nvnSamplerPoolGetSize);
+}
+
+bool memory_pool_info(const void* guest_pool, uint64_t* size, int* flags) {
+    const MemoryPool* p = pool_of_guest(guest_pool);
+    if (!p || p->dead.load()) return false;
+    if (size) *size = p->size;
+    if (flags) *flags = p->flags;
+    return true;
 }
 
 }  // namespace nxrt::nvn

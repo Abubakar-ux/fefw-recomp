@@ -728,6 +728,12 @@ NXTEST(dummy_views_and_sampler) {
             const VkImageView v = gpu::dummy_view(ty, false);
             CHECK(v != VK_NULL_HANDLE);
             CHECK(gpu::dummy_view(ty, false) == v);
+            for (int component : {2, 3}) {
+                const VkImageView integer = gpu::dummy_view(ty, false, component);
+                CHECK(integer != VK_NULL_HANDLE);
+                CHECK(integer != v);
+                CHECK(gpu::dummy_view(ty, false, component) == integer);
+            }
         }
         CHECK(gpu::dummy_view(VK_IMAGE_VIEW_TYPE_2D, true) != VK_NULL_HANDLE);
         CHECK(gpu::dummy_sampler() != VK_NULL_HANDLE);
@@ -786,6 +792,7 @@ NXTEST(sampled_view_float_alias_of_uint_texture) {
         Texture* tu = u.t.get();
         Texture* tf = fl.t.get();
         Texture* tr = rgba.t.get();
+        bool explicit_float_ok = false, explicit_uint_ok = false, incompatible_rejected = false;
         gpu::run_on_render_thread([&] {
             ViewRequest q;
             q.component = 1;   // float shader over the uint texture: R32_SFLOAT alias
@@ -808,11 +815,24 @@ NXTEST(sampled_view_float_alias_of_uint_texture) {
             CHECK(fuint != VK_NULL_HANDLE);
             CHECK(fown != VK_NULL_HANDLE);
             CHECK(fuint != fown);
+            // Explicit views must also agree with the shader's sampled type.
+            q.format = VK_FORMAT_R32_UINT;
+            q.component = 1;
+            explicit_float_ok = gpu::tex_sampled_view(tf, q) == fown;
+            q.format = VK_FORMAT_R32_SFLOAT;
+            q.component = 3;
+            explicit_uint_ok = gpu::tex_sampled_view(tu, q) == vuint;
+            // No raw-bit alias is implemented for this class: never return a float view to UINT.
+            q.format = VK_FORMAT_UNDEFINED;
+            incompatible_rejected = gpu::tex_sampled_view(tr, q) == VK_NULL_HANDLE;
             // Colour attachments of the uint texture render through the float alias; RGBA8 is unchanged.
             CHECK_EQ(gpu::tex_attachment_format(tu, VK_FORMAT_UNDEFINED), VK_FORMAT_R32_SFLOAT);
             CHECK(gpu::tex_attachment_view(tu, 0, 0, 1, VK_FORMAT_UNDEFINED) != VK_NULL_HANDLE);
             CHECK_EQ(gpu::tex_attachment_format(tr, VK_FORMAT_UNDEFINED), VK_FORMAT_R8G8B8A8_UNORM);
         });
+        CHECK(explicit_float_ok);
+        CHECK(explicit_uint_ok);
+        CHECK(incompatible_rejected);
     }
     teardown(r);
 }

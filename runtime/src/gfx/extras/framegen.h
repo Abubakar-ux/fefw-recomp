@@ -42,6 +42,8 @@ void framegen_hudless(VkCommandBuffer cb, VkImage image, VkImageView view, VkFor
 // cb: the present's command buffer (still recording).
 void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2D src, const int32_t crop[4], bool keep_aspect, bool again);
 void framegen_present_end();
+void framegen_swapchain_reset();   // renderer is idle, before replacing/destroying a swapchain
+void framegen_shutdown(void* gfx_device);
 
 // sl.interposer.dll's export `name` (temporal_dlss.cpp); null when Streamline was not started.
 void* streamline_proc(const char* name);

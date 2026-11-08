@@ -148,6 +148,13 @@ struct Texture : Obj {
     uint8_t* mem = nullptr;                 // storage in the game's memory (null: no storage, e.g. a render target the game never reads)
     Ref<MemoryPool> vpool;                  // a sparse texture: the virtual pool it lives in (mem is null; the texels are in the mapped tiles)
     uint64_t voffset = 0;                   // ... and its offset there
+    // Host-backed storage (nvnTextureInitialize): the storage lies outside its pool's memory (placed past the end of the pool, or offset -1
+    // when the game's allocator found no room) in a pool the CPU cannot access. Only the GPU image holds the texels: mem is null, nothing is
+    // uploaded from or read back into the game's memory, and the image starts cleared. Texture objects over the same storage (same pool and
+    // offset, the same shape) share one image, as objects over the same bytes of a pool do; offset -1 names no storage and shares nothing.
+    bool overflow = false;
+    const MemoryPool* overflow_pool = nullptr;   // identity of the storage only (never dereferenced)
+    int64_t overflow_offset = -1;
     uint64_t storage_size = 0;
     uint32_t block_height_gobs = 0;         // level-0 block height in GOBs (block-linear layouts)
     bool block_linear = true;               // false: pitch-linear (NVN_TEXTURE_FLAGS_LINEAR)
@@ -213,7 +220,8 @@ inline void pool_note_change(Pool& p, int id) {
 }
 
 // Every initialized texture is in a registry keyed by its storage range, so a flush of pool memory can mark the textures
-// that live there as CPU-written (nvn_texture_registry.cpp).
+// that live there as CPU-written (nvn_texture_registry.cpp). Host-backed textures (Texture::overflow) are kept apart, by pool and offset:
+// no CPU write reaches them.
 void texture_registry_add(Texture* t);
 void texture_registry_remove(Texture* t);
 void texture_registry_detach_gpu();   // sets Texture::gpu to null on every registered texture (the images are being freed: gpu::tex_shutdown)
@@ -247,8 +255,10 @@ bool texture_read_virtual(const Texture& t, uint64_t at, uint64_t len, uint8_t* 
 void texture_virtual_tile_ptrs(const Texture& t, std::vector<const uint8_t*>& out);
 // Another initialized texture whose storage starts at the same address and has the same shape (target, size, levels, format, layout),
 // that already has a GPU image: the game makes several texture objects over one piece of memory (one per mip level of a cube map it
-// renders, and the one the materials sample), and on the console they are the same bytes. Null when there is none.
+// renders, and the one the materials sample), and on the console they are the same bytes. Null when there is none. For a host-backed
+// texture: one at the same pool and offset.
 Ref<Texture> texture_registry_find_alias(const Texture* t);
+size_t texture_registry_overflow_size();   // host-backed textures registered
 // [nvn] trace_tex_events = 1: logs the life of block-compressed 128x128 cube textures (init, writes by the CPU, copies, uploads) as nvn.tev lines.
 void tev(const Texture* t, const char* what, uint64_t a = 0, uint64_t b = 0);
 void textures_mark_override_candidates_dirty();   // small BC7 sRGB textures: upload again (nxrt/tex_override.h)

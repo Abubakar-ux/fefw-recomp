@@ -105,6 +105,7 @@ struct FormatCheckStats {
 };
 
 struct DeviceFeatures {
+    bool subgroup_size_control = false, compute_full_subgroups = false;
     bool bc = false, astc_ldr = false, etc2 = false;          // textureCompression*: enabled on the device
     bool sampler_anisotropy = false, independent_blend = false, depth_clamp = false, fill_mode_non_solid = false;
     bool timeline_semaphore = false, dynamic_rendering = false, synchronization2 = false;
@@ -139,6 +140,9 @@ struct DeviceLimitsExt {
     uint64_t min_imported_host_alignment = 0;   // VK_EXT_external_memory_host (0: not available)
     uint64_t max_buffer_size = 0;
     uint32_t subgroup_size = 0, subgroup_ops = 0;
+    uint32_t min_subgroup_size = 0, max_subgroup_size = 0;
+    uint32_t max_compute_workgroup_subgroups = 0;
+    VkShaderStageFlags required_subgroup_size_stages = 0;
     uint32_t max_memory_allocation_count = 0;
 };
 

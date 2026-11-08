@@ -42,6 +42,11 @@ void present_last_frame_again();
 // Traces the next whole presented frame like [nvn] trace_frame (the scripted `@shot nvntrace_<name>` calls this).
 void backend_trace_next_frame();
 
+// The size and NVNmemoryPoolFlags of the initialized memory pool behind a guest NVNmemoryPool object. False when `guest_pool` is not a live
+// pool of the back end. For game modules that look after a game's own pool allocators: a texture the game places past the end of a pool the
+// CPU cannot access (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) gets GPU memory of its own instead of failing (nvnTextureInitialize).
+bool memory_pool_info(const void* guest_pool, uint64_t* size, int* flags);
+
 // Shader preparation (S24): compiles the shader parts of every program in a list before the game runs, so the driver already has them when the
 // game asks. The list is written by the setup tool from the player's own game files (<shader cache folder>/../programs.bin, "MPRPRG01").
 // Needs the back end installed (any mode; `register_entry_points = false` is enough) and an open shader cache.

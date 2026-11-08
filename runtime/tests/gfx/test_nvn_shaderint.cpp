@@ -252,7 +252,7 @@ void fill(const nvnapp::Tex& t, uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // A 4x4 cube map (six faces), not registered.
-std::unique_ptr<nvnapp::Tex> make_cube(App& app) {
+std::unique_ptr<nvnapp::Tex> make_cube(App& app, NVNformat format = NVN_FORMAT_RGBA8) {
     auto t = std::make_unique<nvnapp::Tex>();
     t->obj = std::make_unique<NVNtexture>();
     std::memset(t->obj.get(), 0, sizeof(NVNtexture));
@@ -262,13 +262,13 @@ std::unique_ptr<nvnapp::Tex> make_cube(App& app) {
     api.nvnTextureBuilderSetDefaults(&b);
     api.nvnTextureBuilderSetTarget(&b, NVN_TEXTURE_TARGET_CUBEMAP);
     api.nvnTextureBuilderSetSize2D(&b, 4, 4);
-    api.nvnTextureBuilderSetFormat(&b, NVN_FORMAT_RGBA8);
+    api.nvnTextureBuilderSetFormat(&b, format);
     const size_t size = api.nvnTextureBuilderGetStorageSize(&b), align = api.nvnTextureBuilderGetStorageAlignment(&b);
     t->pool = app.pool_main.get();
     t->offset = t->pool->take(size, std::max<size_t>(align, 256));
     t->size = size;
     t->width = t->height = 4;
-    t->format = NVN_FORMAT_RGBA8;
+    t->format = format;
     api.nvnTextureBuilderSetStorage(&b, t->pool->obj.get(), static_cast<ptrdiff_t>(t->offset));
     if (!api.nvnTextureInitialize(t->obj.get(), &b)) return nullptr;
     return t;
@@ -581,13 +581,34 @@ NXTEST(pool_arrays_sample_by_handle) {
     // id 9 registered again: the next draw samples the new texture (only that id is written)
     api.nvnTexturePoolRegisterTexture(app.tex_pool.get(), 9, blue->obj.get(), nullptr);
     CHECK(all_pixels(frame(h9, h12), 32, 0, 255, 255, 1, "id 9 now blue + cube id 12"));
-    // a 2D texture as a cube (and a cube as 2D) is the black dummy
-    CHECK(all_pixels(frame(h12, h9), 0, 0, 0, -1, 1, "shapes that do not match"));
+    // A cube as 2D reads its first face; a 2D texture as cube gets the dummy.
+    CHECK(all_pixels(frame(h12, h9), 32, 0, 0, -1, 1, "cube first face as 2D, flat texture as cube dummy"));
     // finalized while still registered at id 5, no live texture on its storage: the dummy, not the released image
     api.nvnTextureFinalize(red->obj.get());
     CHECK(all_pixels(frame(h5, h12), 32, 0, 0, -1, 1, "id 5 finalized + cube id 12"));
+    // A float-backed probe registered through an explicit integer view must still be a float
+    // image in the pool: the translated TEX returns register bits through OpTypeFloat.
+    auto probe = make_cube(app, NVN_FORMAT_RGBA32F);
+    REQUIRE(probe != nullptr);
+    NVNcopyRegion region = {0, 0, 0, 4, 4, 6};
+    std::vector<float> texels(4 * 4 * 6 * 4, 0.0f);
+    for (size_t i = 0; i < texels.size(); i += 4) { texels[i] = 0.5f; texels[i + 3] = 1.0f; }
+    api.nvnTextureWriteTexels(probe->obj.get(), nullptr, &region, texels.data());
+    NVNtextureView view;
+    api.nvnTextureViewSetDefaults(&view);
+    api.nvnTextureViewSetFormat(&view, NVN_FORMAT_RGBA32UI);
+    api.nvnTexturePoolRegisterTexture(app.tex_pool.get(), 12, probe->obj.get(), &view);
+    CHECK(all_pixels(frame(h5, h12), 128, 0, 0, -1, 1, "float probe via explicit integer view"));
+    auto integer_probe = make_cube(app, NVN_FORMAT_RGBA32UI);
+    REQUIRE(integer_probe != nullptr);
+    api.nvnTextureWriteTexels(integer_probe->obj.get(), nullptr, &region, texels.data());
+    api.nvnTexturePoolRegisterTexture(app.tex_pool.get(), 12, integer_probe->obj.get(), nullptr);
+    CHECK(all_pixels(frame(h5, h12), 128, 0, 0, -1, 1, "integer probe holding float register bits"));
+    api.nvnTextureViewSetFormat(&view, NVN_FORMAT_RGBA32F);
+    api.nvnTexturePoolRegisterTexture(app.tex_pool.get(), 12, integer_probe->obj.get(), &view);
+    CHECK(all_pixels(frame(h5, h12), 128, 0, 0, -1, 1, "integer probe via explicit float view"));
     const auto s1 = nxrt::nvn::backend_stats();
-    CHECK_EQ(s1.draws - s0.draws, 5ull);
+    CHECK_EQ(s1.draws - s0.draws, 8ull);
     CHECK_EQ(s1.draws_skipped - s0.draws_skipped, 0ull);
     CHECK_EQ(app.validation().errors, 0ull);
 }

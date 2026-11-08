@@ -540,7 +540,7 @@ void resolution_group(Menu& m) {
                 pending_note(ini_pending(m, fixed), ini_boot(m, fixed));
             }
         }
-        ini_combo_row(m, *ini_key("fefw", "shadow_size"), "Shadow resolution", "The shadow map's base size. Larger is sharper and costs GPU time.",
+        ini_combo_row(m, *ini_key("fefw", "shadow_size"), "Shadow resolution", "The shadow map's base size. Larger is sharper and costs GPU time and memory (8192: about 1.3 GB more).",
                       kShadowNames, kShadowVals, 8);
         ini_combo_row(m, *ini_key("fefw", "quality"), "Quality",
                       "Docked gives every render configuration the docked one's shadows and effects, so a handheld or 1080p answer keeps them.",
@@ -554,7 +554,7 @@ void resolution_group(Menu& m) {
     if (ow > 0 && oh > 0) {
         int rw = ratio > 0 ? 2 * static_cast<int>(std::lround(ow * std::clamp(ratio, 0.25, 1.0) / 2)) : (ow + 1) / 2;
         int rh = ratio > 0 ? 2 * static_cast<int>(std::lround(oh * std::clamp(ratio, 0.25, 1.0) / 2)) : (oh + 1) / 2;
-        const bool capped = static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2);
+        const bool capped = !res_rt_pool_extended() && static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2);
         if (capped) rw = (ow + 1) / 2, rh = (oh + 1) / 2;
         ImGui::TextDisabled("Next start: %d x %d rendered into %d x %d%s", rw, rh, ow, oh,
                             capped ? " (above 1440p the game's render-target pool holds half per side at most)" : "");

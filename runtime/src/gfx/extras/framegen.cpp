@@ -66,6 +66,7 @@ struct Pair {
 struct State {
     bool tried = false, base = false;   // base: the core functions (frame tokens)
     bool markers = false;               // Reflex and PCL loaded
+    bool fg_tried = false;
     bool fg = false;                    // DLSS-G usable
     Fns f;
     gfx::Device* dev = nullptr;
@@ -83,6 +84,7 @@ struct State {
     uint64_t t0 = 0;
     uint32_t n_game = 0, n_shown = 0, n_on = 0, n_extra_inputs = 0, n_extra_sr = 0;
     uint32_t status = 0;
+    uint32_t min_dimension = 0;
     FfxFgFrame ffx;                     // FSR 3: this frame's inputs, used at the present
     VkImage ffx_hudless = VK_NULL_HANDLE;
     uint64_t last_present_ns = 0, ffx_count0 = 0;
@@ -116,7 +118,7 @@ bool base_init() {
     s.f.feature_fn = reinterpret_cast<PFun_slGetFeatureFunction*>(streamline_proc("slGetFeatureFunction"));
     s.f.supported = reinterpret_cast<PFun_slIsFeatureSupported*>(streamline_proc("slIsFeatureSupported"));
     s.base = s.f.token && s.f.constants && s.f.tag && s.f.feature_fn && s.f.supported;
-    if (!s.base || !dlss_fg()) return s.base;
+    if (!s.base || !dlss_fg() || !streamline_framegen_available()) return s.base;
     if (feature_fn(s, sl::kFeatureReflex, "slReflexSetOptions", s.f.reflex_set) && feature_fn(s, sl::kFeatureReflex, "slReflexSleep", s.f.reflex_sleep) &&
         feature_fn(s, sl::kFeatureReflex, "slReflexGetState", s.f.reflex_get) && feature_fn(s, sl::kFeaturePCL, "slPCLSetMarker", s.f.marker)) {
         sl::ReflexOptions ro;
@@ -148,11 +150,10 @@ void open_frame(State& s) {
 }
 
 bool fg_init(State& s, gfx::Device* dev) {
-    static bool tried = false;
-    if (tried) return s.fg;
-    tried = true;
+    if (s.fg_tried) return s.fg;
+    s.fg_tried = true;
     s.dev = dev;
-    if (!s.markers || !dev) return false;
+    if (!s.markers || !dev || !streamline_framegen_available()) return false;
     sl::AdapterInfo ai;
     ai.vkPhysicalDevice = reinterpret_cast<void*>(dev->physical());
     const sl::Result sup = s.f.supported(sl::kFeatureDLSS_G, ai);
@@ -162,9 +163,17 @@ bool fg_init(State& s, gfx::Device* dev) {
     }
     if (!feature_fn(s, sl::kFeatureDLSS_G, "slDLSSGSetOptions", s.f.fg_set) || !feature_fn(s, sl::kFeatureDLSS_G, "slDLSSGGetState", s.f.fg_get)) return false;
     sl::DLSSGState gs;
-    s.f.fg_get(sl::ViewportHandle(1u), gs, nullptr);
+    if (s.f.fg_get(sl::ViewportHandle(1u), gs, nullptr) != sl::Result::eOk) {
+        NXLOG_W(kTag, "DLSS-G state unavailable: frame generation off");
+        return false;
+    }
     NXLOG_I(kTag, "DLSS Frame Generation available (status %u, at most %u generated frames, minimum size %u)%s", static_cast<unsigned>(gs.status),
             gs.numFramesToGenerateMax, gs.minWidthOrHeight, fg_setting() == 2 ? ": kept off ([dlss] frame_gen = 2)" : "");
+    if (!gs.numFramesToGenerateMax) {
+        NXLOG_W(kTag, "DLSS-G reports no supported generated frames: using ordinary presentation");
+        return false;
+    }
+    s.min_dimension = gs.minWidthOrHeight;
     s.fg = true;
     return true;
 }
@@ -253,6 +262,7 @@ void set_mode(State& s, bool on) {
     o.mode = on ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
     o.numFramesToGenerate = 1;
     o.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+    o.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
     o.onErrorCallback = &on_api_error;
     const sl::Result r = s.f.fg_set(sl::ViewportHandle(1u), o);
     if (r != sl::Result::eOk) {
@@ -466,13 +476,14 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
         ffx_present_begin(st(), cb, backbuffer, rect, again);
         return;
     }
-    if (!temporal_dlss_started() || !base_init()) return;
+    if (!dlss_fg() || !temporal_dlss_started() || !base_init()) return;
     State& s = st();
     open_frame(s);
     if (s.fg) {
         int32_t rect[4];
         picture_rect(backbuffer, src, crop, keep_aspect, rect);
-        const bool want = s.inputs && !again && fg_setting() == 1;
+        const bool want = s.inputs && !again && fg_setting() == 1 &&
+                          backbuffer.width >= s.min_dimension && backbuffer.height >= s.min_dimension;
         s.streak = want ? s.streak + 1 : 0;
         const bool on = want && s.streak >= 2;
         const bool moved = backbuffer.width != s.bb.width || backbuffer.height != s.bb.height || !std::equal(rect, rect + 4, s.rect);
@@ -481,7 +492,7 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
         std::copy(rect, rect + 4, s.rect);
         if (on && (moved || !s.on)) set_mode(s, true);
         else if (!on && s.on) set_mode(s, false);
-        if (s.on && (rect[0] || rect[1] || static_cast<uint32_t>(rect[2]) != backbuffer.width || static_cast<uint32_t>(rect[3]) != backbuffer.height)) {
+        if (s.on) {   // tag the full rect too, clearing any previous letterbox extent
             sl::FrameToken* t = nullptr;
             const sl::Extent sub{static_cast<uint32_t>(rect[1]), static_cast<uint32_t>(rect[0]), static_cast<uint32_t>(rect[2]), static_cast<uint32_t>(rect[3])};
             sl::ResourceTag bt(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent, &sub);
@@ -519,15 +530,13 @@ void framegen_present_end() {
     }
     if (s.markers) marker(s, sl::PCLMarker::ePresentEnd);
     if (s.fg) {
-        uint32_t shown = 1;
-        if (s.on) {
-            sl::DLSSGState gs;
-            if (s.f.fg_get(sl::ViewportHandle(1u), gs, nullptr) == sl::Result::eOk) {
-                shown = std::max(1u, gs.numFramesActuallyPresented);
-                s.status = static_cast<uint32_t>(gs.status);
-            }
-            ++s.n_on;
+        uint32_t shown = 0;
+        sl::DLSSGState gs;
+        if (s.f.fg_get(sl::ViewportHandle(1u), gs, nullptr) == sl::Result::eOk) {
+            shown = gs.numFramesActuallyPresented;   // report measured presents, never invent a frame
+            s.status = static_cast<uint32_t>(gs.status);
         }
+        s.n_on += s.on ? 1 : 0;
         ++s.n_game;
         s.n_shown += shown;
         report(s);
@@ -546,6 +555,36 @@ void framegen_present_end() {
     s.ffx = FfxFgFrame();
     s.ffx_hudless = VK_NULL_HANDLE;
     open_frame(s);
+}
+
+void framegen_swapchain_reset() {
+    State& s = st();
+    if (s.on && s.f.fg_set) set_mode(s, false);
+    if (s.fg && s.f.tag) {
+        sl::FrameToken* t = nullptr;
+        sl::ResourceTag tags[] = {
+            {nullptr, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent},
+            {nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent},
+            {nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent},
+            {nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent}};
+        if (s.f.token(t, &s.index) == sl::Result::eOk && t)
+            s.f.tag(*t, sl::ViewportHandle(1u), tags, 4, nullptr);
+    }
+    s.streak = 0;
+    s.inputs = false;
+    s.bb = {};
+}
+
+void framegen_shutdown(void* gfx_device) {
+    State& s = st();
+    if (s.dev != gfx_device) return;
+    framegen_swapchain_reset();
+    for (auto& p : s.pair) {
+        s.dev->destroy_image(p.depth);
+        s.dev->destroy_image(p.motion);
+    }
+    for (auto& p : s.retired) s.dev->destroy_image(p.second);
+    s = State();
 }
 
 }  // namespace nxrt::extras

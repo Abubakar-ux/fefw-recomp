@@ -14,6 +14,18 @@
 // [fefw] render = WxH                                                              (wins over render_ratio)
 // [fefw] shadow_size = 0 (the config's) | 512..8192                                (shadow-map base size)
 // [fefw] quality = console | docked                                                (docked: config 0's quality fields in every config)
+// [fefw] rt_pool_overflow_mb = 3072 | 0..3072                                       (room past the render-target pool, below)
+//
+// The render-target pool. Graphics init makes it at 0x646f88 (`mov w9, #0x3f000000`, flags 0xa1: CPU no access, GPU cached,
+// compressible) as a pool object of 0x160 bytes (0x5d640): the NVNmemoryPool at +8 over 0x3f000000 bytes of the game's heap, and at +0x108
+// an nn::mem::NumberLineAllocator in 256-byte units that is given the whole pool (AddRange(0, size / 256)). Every render target and the
+// shadow maps are placed by it. 1008 MiB holds the console's sizes; 4096 or 8192 shadows (64 or 256 MiB each, five of them) or a 2160p
+// output rendered above half per side do not fit: the allocator answers offset -1 and the targets get no storage (a black picture).
+// The back end gives a texture placed past the end of a pool the CPU cannot access GPU memory of its own (nvnTextureInitialize, host-backed
+// storage). So the host stands in front of that allocator (its SDK imports): when it finds no room, a room past the pool answers instead,
+// rt_pool_overflow_mb from offset 1 GiB on (first fit; Free gives the place back). The allocator itself is left as it is: whatever fits in
+// the pool is placed exactly where it was before. 0 = off: such targets get offset -1 (the back end still backs them, but texture objects over
+// one of them cannot share its image), and above 1440p output the render is capped at half per side.
 #include "fefw_game.h"
 
 #include <algorithm>
@@ -23,7 +35,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
+#include <map>
+#include <mutex>
 #include <string>
+#include <utility>
 
 #include "nxrt/abi.h"
 #include "nxrt/config.h"
@@ -31,6 +47,7 @@
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/module.h"
+#include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
 
 namespace nxrt::games::fefw {
@@ -59,6 +76,195 @@ struct Res {
 Res& rs() {
     static Res r;
     return r;
+}
+
+// ---- the render-target pool's allocator ------------------------------------------------------------------------------------------
+constexpr uint64_t kRtPoolSize = 0x3f000000;   // main 0x646f88
+constexpr int kPoolCpuNoAccess = 0x1;           // NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS
+constexpr uint64_t kAllocatorAt = 0x108;        // in the pool object: the NumberLineAllocator ...
+constexpr uint64_t kNvnPoolAt = 0x8;            // ... and the NVNmemoryPool it places into
+constexpr uint64_t kUnit = 256;                 // the allocator's unit (0x5d8c0: size + 255 >> 8, the alignment >> 8)
+constexpr int64_t kOverflowStart = (1ll << 30) / kUnit;   // the room past the pool starts at 1 GiB (16 MiB past the pool's end)
+constexpr int64_t kOverflowMaxMb = 3072;        // up to 4 GiB of offsets in all
+
+// An SDK function the hooks below stand in front of. Its address is looked up at the first call: the modules are not loaded at install.
+struct SdkFn {
+    const char* sym;
+    std::atomic<uint64_t> addr{0};
+};
+SdkFn g_add_range{"_ZN2nn3mem19NumberLineAllocator8AddRangeEii"};          // (this, int first, int count)
+SdkFn g_alloc3{"_ZN2nn3mem19NumberLineAllocator8AllocateEPiii"};           // bool (this, int* out, int count, int align)
+SdkFn g_alloc2{"_ZN2nn3mem19NumberLineAllocator8AllocateEPii"};            // bool (this, int* out, int count)
+SdkFn g_free{"_ZN2nn3mem19NumberLineAllocator4FreeEi"};                    // (this, int first)
+SdkFn g_finalize{"_ZN2nn3mem19NumberLineAllocator8FinalizeEv"};            // (this)
+
+void call_sdk(::Ctx* c, SdkFn& f) {
+    uint64_t a = f.addr.load(std::memory_order_acquire);
+    if (!a) {
+        a = module_find_symbol(f.sym);
+        if (!a || hle_is_thunk(a)) trap("nn::mem::NumberLineAllocator: the SDK's own function is not found", a);
+        f.addr.store(a, std::memory_order_release);
+    }
+    const uint64_t lr = c->x[30], fn = c->fn;
+    dispatch_call(c, a);
+    c->x[30] = lr;
+    c->fn = fn;
+}
+
+// The room past one render-target pool, in the allocator's units: what the pool's allocator cannot place goes here (first fit).
+struct Room {
+    std::map<int64_t, int64_t> free;   // start -> length
+    std::map<int64_t, int64_t> used;   // start -> length
+    int64_t in_use = 0;
+};
+
+struct RtPool {
+    bool installed = false;
+    int64_t room_units = 0;            // [fefw] rt_pool_overflow_mb in units (0: off)
+    std::atomic<bool> extended{false};
+    std::mutex mu;
+    std::map<uint64_t, Room> rooms;    // the pool's NumberLineAllocator (guest address) -> its room
+    uint64_t placed = 0;               // allocations placed in a room so far (logs)
+};
+
+RtPool& rp() {
+    static RtPool p;
+    return p;
+}
+
+int64_t room_take(Room& r, int64_t count, int64_t align) {
+    for (auto it = r.free.begin(); it != r.free.end(); ++it) {
+        const int64_t at = (it->first + align - 1) / align * align, end = it->first + it->second;
+        if (at + count > end) continue;
+        const int64_t s0 = it->first;
+        r.free.erase(it);
+        if (at > s0) r.free.emplace(s0, at - s0);
+        if (at + count < end) r.free.emplace(at + count, end - (at + count));
+        r.used.emplace(at, count);
+        r.in_use += count;
+        return at;
+    }
+    return -1;
+}
+
+bool room_give(Room& r, int64_t at) {
+    auto u = r.used.find(at);
+    if (u == r.used.end()) return false;
+    int64_t s0 = at, len = u->second;
+    r.in_use -= len;
+    r.used.erase(u);
+    auto next = r.free.lower_bound(s0);
+    if (next != r.free.end() && next->first == s0 + len) { len += next->second; next = r.free.erase(next); }
+    if (next != r.free.begin()) {
+        auto prev = std::prev(next);
+        if (prev->first + prev->second == s0) { s0 = prev->first; len += prev->second; r.free.erase(prev); }
+    }
+    r.free.emplace(s0, len);
+    return true;
+}
+
+// AddRange(int first, int count): the SDK's. The render-target pool's allocator (the whole pool as its range, and the NVNmemoryPool 0x100
+// bytes before it a live pool of that size the CPU cannot access) also gets a room past the pool.
+void nla_add_range(::Ctx* c) {
+    RtPool& p = rp();
+    const uint64_t self = c->x[0];
+    const int32_t first = static_cast<int32_t>(c->x[1]), count = static_cast<int32_t>(c->x[2]);
+    call_sdk(c, g_add_range);
+    if (!p.room_units || first != 0 || count <= 0 || static_cast<uint64_t>(count) * kUnit != kRtPoolSize || self < kAllocatorAt) return;
+    const uint64_t guest_pool = self - kAllocatorAt + kNvnPoolAt;
+    uint64_t size = 0;
+    int flags = 0;
+    if (!mem::is_mapped(guest_pool, 16) || !nvn::memory_pool_info(reinterpret_cast<const void*>(guest_pool), &size, &flags) || size != kRtPoolSize ||
+        !(flags & kPoolCpuNoAccess)) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            NXLOG_W(kTag, "an allocator over 0x%llx bytes is not the render-target pool's (pool 0x%llx, size 0x%llx, flags 0x%x): no room past it",
+                    static_cast<unsigned long long>(kRtPoolSize), static_cast<unsigned long long>(guest_pool), static_cast<unsigned long long>(size),
+                    static_cast<unsigned>(flags));
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(p.mu);
+        Room& r = p.rooms[self];
+        r = Room();
+        r.free.emplace(kOverflowStart, p.room_units);
+    }
+    if (!p.extended.exchange(true))
+        NXLOG_I(kTag, "render-target pool (%llu MiB, flags 0x%x): what its allocator cannot place goes to offsets %llu to %llu MiB, with GPU memory of its "
+                      "own ([fefw] rt_pool_overflow_mb = %lld)",
+                static_cast<unsigned long long>(kRtPoolSize >> 20), static_cast<unsigned>(flags), static_cast<unsigned long long>(kOverflowStart * kUnit >> 20),
+                static_cast<unsigned long long>((kOverflowStart + p.room_units) * kUnit >> 20), static_cast<long long>(p.room_units * kUnit >> 20));
+}
+
+// Allocate(int* out, int count[, int align]): the SDK's. When it finds no room in the render-target pool, the room past the pool answers.
+void nla_allocate(::Ctx* c, SdkFn& f, bool aligned) {
+    RtPool& p = rp();
+    const uint64_t self = c->x[0], out = c->x[1];
+    const int64_t count = static_cast<int32_t>(c->x[2]), align = aligned ? std::max<int64_t>(1, static_cast<int32_t>(c->x[3])) : 1;
+    call_sdk(c, f);
+    if ((c->x[0] & 1) || count <= 0 || !out) return;
+    std::lock_guard<std::mutex> lk(p.mu);
+    auto it = p.rooms.find(self);
+    if (it == p.rooms.end()) return;
+    const int64_t at = room_take(it->second, count, align);
+    if (at < 0 || !mem::is_mapped(out, 4)) {
+        if (at >= 0) room_give(it->second, at);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            NXLOG_W(kTag, "render-target pool: %lld KiB do not fit in the pool or the room past it (%lld of %lld MiB in use): the game's allocator fails, "
+                          "as it did before",
+                    static_cast<long long>(count * kUnit >> 10), static_cast<long long>(it->second.in_use * kUnit >> 20),
+                    static_cast<long long>(p.room_units * kUnit >> 20));
+        return;
+    }
+    const int32_t v = static_cast<int32_t>(at);
+    std::memcpy(reinterpret_cast<void*>(out), &v, 4);
+    c->x[0] = 1;
+    if (p.placed++ < 24)
+        NXLOG_I(kTag, "render-target pool full: %lld KiB placed past it at offset 0x%llx (%lld MiB past the pool in use)", static_cast<long long>(count * kUnit >> 10),
+                static_cast<unsigned long long>(at * kUnit), static_cast<long long>(it->second.in_use * kUnit >> 20));
+}
+void nla_allocate3(::Ctx* c) { nla_allocate(c, g_alloc3, true); }
+void nla_allocate2(::Ctx* c) { nla_allocate(c, g_alloc2, false); }
+
+// Free(int first): a place in the room goes back to it; the rest to the SDK's.
+void nla_free(::Ctx* c) {
+    RtPool& p = rp();
+    const uint64_t self = c->x[0];
+    const int64_t at = static_cast<int32_t>(c->x[1]);
+    if (at >= kOverflowStart) {
+        std::lock_guard<std::mutex> lk(p.mu);
+        auto it = p.rooms.find(self);
+        if (it != p.rooms.end() && room_give(it->second, at)) return;
+    }
+    call_sdk(c, g_free);
+}
+
+void nla_finalize(::Ctx* c) {
+    RtPool& p = rp();
+    {
+        std::lock_guard<std::mutex> lk(p.mu);
+        p.rooms.erase(c->x[0]);
+    }
+    call_sdk(c, g_finalize);
+}
+
+void rt_pool_install() {
+    RtPool& p = rp();
+    if (p.installed) return;
+    p.installed = true;
+    const int64_t mb = std::clamp<int64_t>(config_get_int("fefw", "rt_pool_overflow_mb", kOverflowMaxMb), 0, kOverflowMaxMb);
+    if (mb <= 0) {
+        NXLOG_I(kTag, "render-target pool: no room past it ([fefw] rt_pool_overflow_mb = 0)");
+        return;
+    }
+    p.room_units = (mb << 20) / static_cast<int64_t>(kUnit);
+    const std::pair<SdkFn*, HleFn> hooks[] = {{&g_add_range, nla_add_range}, {&g_alloc3, nla_allocate3}, {&g_alloc2, nla_allocate2},
+                                              {&g_free, nla_free}, {&g_finalize, nla_finalize}};
+    for (const auto& h : hooks) {
+        hle_register(h.first->sym, h.second);
+        module_override_symbol(h.first->sym);
+    }
 }
 
 bool parse_wxh(const std::string& v, int* w, int* h) {
@@ -135,8 +341,8 @@ void apply(Res& r) {
         rh = std::clamp(rh, 64, oh);
         // The game's render targets live in one 0x3f000000-byte memory pool (made at 0x646f88). Above 1440p output it holds a render of at
         // most half the output per side: 3840x2160 from 2560x1440 runs out and the game's allocator gives the HUD and post targets
-        // offset -1 (a black picture). 2560x1440 at full size fits.
-        if (static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2)) {
+        // offset -1 (a black picture). 2560x1440 at full size fits. With room past the pool (rt_pool_install) the rest goes there.
+        if (!rp().extended.load() && static_cast<int64_t>(ow) * oh > 2560 * 1440 && (rw > (ow + 1) / 2 || rh > (oh + 1) / 2)) {
             if (first)
                 NXLOG_W(kTag, "render %dx%d for output %dx%d does not fit the game's render-target pool: %dx%d", rw, rh, ow, oh, (ow + 1) / 2,
                         (oh + 1) / 2);
@@ -171,10 +377,13 @@ void get_current_graphics_scale(::Ctx* c) {
 
 }  // namespace
 
+bool res_rt_pool_extended() { return rp().extended.load(); }
+
 void res_install(uint64_t base) {
     Res& r = rs();
     if (r.base) return;
     r.base = base;
+    rt_pool_install();
     read_options(r);
     if (!any_option(r)) return;
     r.sdk_fn = module_find_symbol(kGetScale);

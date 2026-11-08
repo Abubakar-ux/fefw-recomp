@@ -394,6 +394,11 @@ bool has_window() { return g_window != nullptr; }
 
 void* native_window() { return g_window; }
 
+void* native_hinstance() {
+    if (!g_window) return nullptr;
+    return SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
+}
+
 void* native_hwnd() {
     if (!g_window) return nullptr;
     return SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);

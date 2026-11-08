@@ -69,6 +69,7 @@ std::wstring sl_dir() {
 struct Sl {
     HMODULE mod = nullptr;
     bool started = false;
+    bool framegen = false;
     PFun_slInit* init = nullptr;
     PFun_slIsFeatureSupported* supported = nullptr;
     PFun_slGetNewFrameToken* token = nullptr;
@@ -303,9 +304,12 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
     plugin_dir = dir;
     paths[0] = plugin_dir.c_str();
     static const sl::Feature features[] = {sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex, sl::kFeaturePCL};
-    const bool fg = framegen_dlss();
+    bool fg = framegen_dlss();
     if (fg && !(exists(dir + L"sl.dlss_g.dll") && exists(dir + L"sl.reflex.dll") && exists(dir + L"sl.pcl.dll") && exists(dir + L"nvngx_dlssg.dll")))
-        NXLOG_W(kTag, "[dlss] frame_gen: sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll or nvngx_dlssg.dll is missing in %s", narrow(dir).c_str());
+    {
+        NXLOG_W(kTag, "DLSS-G off: required frame generation DLLs missing in %s; using ordinary presentation", narrow(dir).c_str());
+        fg = false;
+    }
     sl::Preferences pref;
     pref.showConsole = false;
     pref.logLevel = sl::LogLevel::eDefault;
@@ -327,9 +331,46 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
         return nullptr;
     }
     s.started = true;
+    s.framegen = fg;
     NXLOG_I(kTag, "Streamline %d.%d.%d started from %s: the Vulkan instance and device are created through it", SL_VERSION_MAJOR, SL_VERSION_MINOR,
             SL_VERSION_PATCH, narrow(dir).c_str());
     return gipa;
+}
+
+bool streamline_framegen_available() { return sl_state().started && sl_state().framegen; }
+
+void streamline_check_framegen(VkPhysicalDevice physical) {
+    Sl& s = sl_state();
+    if (!s.started || !s.framegen) return;
+    sl::AdapterInfo ai;
+    ai.vkPhysicalDevice = reinterpret_cast<void*>(physical);
+    const sl::Result r = s.supported(sl::kFeatureDLSS_G, ai);
+    if (r == sl::Result::eOk) return;
+    NXLOG_W(kTag, "DLSS-G unavailable (slIsFeatureSupported %d)%s: using ordinary presentation", static_cast<int>(r),
+            r == sl::Result::eErrorOSDisabledHWS ? "; enable Windows hardware-accelerated GPU scheduling (HAGS) and restart Windows" :
+            "; check GPU/driver, Windows HAGS and Streamline logs");
+    auto unload = reinterpret_cast<PFun_slSetFeatureLoaded*>(streamline_proc("slSetFeatureLoaded"));
+    auto is_loaded = reinterpret_cast<PFun_slIsFeatureLoaded*>(streamline_proc("slIsFeatureLoaded"));
+    bool loaded = true;
+    if (is_loaded) is_loaded(sl::kFeatureDLSS_G, loaded);
+    if (loaded && unload) {
+        const sl::Result u = unload(sl::kFeatureDLSS_G, false);
+        if (u != sl::Result::eOk) NXLOG_W(kTag, "could not unload unsupported DLSS-G (%d)", static_cast<int>(u));
+    }
+    s.framegen = false;
+}
+
+void streamline_shutdown() {
+    Sl& s = sl_state();
+    if (!s.started) return;
+    auto shutdown = reinterpret_cast<PFun_slShutdown*>(streamline_proc("slShutdown"));
+    if (shutdown) {
+        const sl::Result r = shutdown();
+        if (r != sl::Result::eOk) NXLOG_W(kTag, "slShutdown failed (%d)", static_cast<int>(r));
+        else NXLOG_I(kTag, "Streamline shut down");
+    }
+    s.started = s.framegen = false;
+    // Vulkan dispatch pointers still refer into the interposer until instance destruction.
 }
 
 TemporalBackend* temporal_dlss(void* gfx_device, bool dlaa) {

@@ -76,5 +76,8 @@ bool temporal_dlss_started();   // Streamline was initialised before the Vulkan 
 // Streamline must own vkCreateInstance / vkCreateDevice / the swapchain calls: when the start-up mode is DLSS or DLAA, this loads
 // sl.interposer.dll, runs slInit and returns its vkGetInstanceProcAddr for volkInitializeCustom (vk_device.cpp). Null: use the normal loader.
 PFN_vkGetInstanceProcAddr streamline_preinit();
+bool streamline_framegen_available();
+void streamline_check_framegen(VkPhysicalDevice physical);
+void streamline_shutdown();   // after swapchains/resources, before destroying the Vulkan device; keep interposer mapped
 
 }  // namespace nxrt::extras

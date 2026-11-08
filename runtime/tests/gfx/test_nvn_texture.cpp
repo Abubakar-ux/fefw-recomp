@@ -82,11 +82,12 @@ struct Pool {
     std::vector<uint8_t> mem;
     NVNmemoryPool guest;
     static constexpr uint64_t kGpuBase = 0x7000000000ull;
-    explicit Pool(size_t bytes) : mem(bytes, 0) {
+    explicit Pool(size_t bytes, int flags = 0) : mem(bytes, 0) {
         std::memset(&guest, 0, sizeof guest);
         auto* host = new be::MemoryPool();
         host->base = mem.data();
         host->size = mem.size();
+        host->flags = flags;
         host->gpu_base = kGpuBase;
         be::bind_guest(&guest, host);
     }
@@ -588,6 +589,77 @@ NXTEST(initialize_rejects_bad_builders) {
     build(a, bld, pool, NVN_TEXTURE_TARGET_2D_ARRAY, 4, 4, 0, 1, NVN_FORMAT_R8);           // an array without layers has no layout
     CHECK_EQ(a.init(&tex, &bld), 0);
     CHECK(be::host_of<be::Texture>(&tex) == nullptr);
+}
+
+// Storage past the end of a pool the CPU cannot access (a game whose allocator was given more than the pool), or at offset -1 (its allocator
+// found no room): the texture is made host-backed (Texture::overflow, its GPU image alone) instead of being refused. Pools the CPU can access
+// (initialize_rejects_bad_builders) and buffer textures are still refused.
+NXTEST(initialize_backs_storage_outside_a_cpu_no_access_pool) {
+    setup();
+    Api a;
+    Pool pool(1 << 16, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    NVNtextureBuilder bld;
+    NVNtexture past, same, other_shape, neg, neg2, inside, buf, win;
+    for (NVNtexture* t : {&past, &same, &other_shape, &neg, &neg2, &inside, &buf, &win}) std::memset(t, 0, sizeof *t);
+    const size_t before = be::texture_registry_size(), before_ovf = be::texture_registry_overflow_size();
+
+    build(a, bld, pool, NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8, 1 << 20);   // well past the pool's end
+    CHECK_EQ(a.init(&past, &bld), 1);
+    be::Texture* h = be::host_of<be::Texture>(&past);
+    CHECK(h != nullptr);
+    CHECK(h && h->overflow);
+    CHECK(h && h->mem == nullptr);                       // no bytes in the game's memory
+    CHECK(h && !h->cpu_dirty.load());                    // nothing to upload
+    CHECK(h && h->overflow_offset == (1 << 20));
+    CHECK_EQ(static_cast<long long>(a.pool_offset(&past)), static_cast<long long>(1 << 20));   // the game's own numbers
+    CHECK(a.pool_of(&past) == &pool.guest);
+    CHECK_EQ(a.storage_size(&past), 16384);
+    CHECK_EQ(be::texture_registry_size(), before);       // not with the textures CPU writes can reach
+    CHECK_EQ(be::texture_registry_overflow_size(), before_ovf + 1);
+
+    // Texel calls have no storage to work on: they do nothing (the pool is not CPU-accessible, so the game does not make them).
+    std::vector<uint8_t> px(16 * 16 * 4, 0x5a);
+    const NVNcopyRegion r = region(0, 0, 0, 16, 16, 1);
+    a.write(&past, nullptr, &r, px.data());
+    a.read(&past, nullptr, &r, px.data());
+    CHECK_EQ(px[0], 0x5a);
+    a.flush(&past, nullptr, &r);
+    a.invalidate(&past, nullptr, &r);
+    CHECK(h && !h->cpu_dirty.load());
+
+    // Another object over the same storage and shape is the same texture; another shape or offset -1 is not.
+    CHECK_EQ(a.init(&same, &bld), 1);
+    CHECK_EQ(a.compare(&past, &same), 1);
+    build(a, bld, pool, NVN_TEXTURE_TARGET_2D, 32, 32, 1, 1, NVN_FORMAT_RGBA8, 1 << 20);
+    CHECK_EQ(a.init(&other_shape, &bld), 1);
+    CHECK_EQ(a.compare(&past, &other_shape), 0);
+    build(a, bld, pool, NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8, -1);         // the allocator found no room
+    CHECK_EQ(a.init(&neg, &bld), 1);
+    CHECK_EQ(a.init(&neg2, &bld), 1);
+    be::Texture* hn = be::host_of<be::Texture>(&neg);
+    CHECK(hn && hn->overflow && hn->overflow_offset == -1 && hn->mem == nullptr);
+    CHECK_EQ(a.compare(&neg, &neg2), 0);                 // offset -1 names no storage
+    CHECK_EQ(a.compare(&past, &neg), 0);
+
+    // Inside the pool: the game's memory, as always.
+    build(a, bld, pool, NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8, 0);
+    CHECK_EQ(a.init(&inside, &bld), 1);
+    be::Texture* hi = be::host_of<be::Texture>(&inside);
+    CHECK(hi && !hi->overflow && hi->mem == pool.mem.data());
+    CHECK_EQ(a.compare(&inside, &past), 0);
+
+    // Refused: a buffer texture reads its texels from the pool's memory.
+    build(a, bld, pool, NVN_TEXTURE_TARGET_BUFFER, 1024, 1, 1, 1, NVN_FORMAT_RGBA8, 1 << 20);
+    CHECK_EQ(a.init(&buf, &bld), 0);
+    // A window texture is presented from its image: host-backed as well.
+    build(a, bld, pool, NVN_TEXTURE_TARGET_2D, 64, 64, 1, 1, NVN_FORMAT_RGBA8, 2 << 20, NVN_TEXTURE_FLAGS_DISPLAY);
+    CHECK_EQ(a.init(&win, &bld), 1);
+    be::Texture* hw = be::host_of<be::Texture>(&win);
+    CHECK(hw && hw->overflow && hw->is_display && hw->mem == nullptr);
+
+    for (NVNtexture* t : {&past, &same, &other_shape, &neg, &neg2, &inside, &win}) a.finalize(t);
+    CHECK_EQ(be::texture_registry_size(), before);
+    CHECK_EQ(be::texture_registry_overflow_size(), before_ovf);
 }
 
 NXTEST(builder_storage_queries_match_the_texture) {

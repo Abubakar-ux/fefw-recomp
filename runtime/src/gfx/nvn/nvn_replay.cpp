@@ -1833,7 +1833,8 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
             w.pBufferInfo = &binfo.back();
             mix(reinterpret_cast<uint64_t>(bi.buffer)); mix(bi.offset); mix(bi.range);
         } else if (d.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-            VkDescriptorImageInfo ii = {dummy_sampler(), dummy_view(view_type_for(b), b.image.depth), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            const int component = b.image.component == ScalarType::Sint ? 2 : b.image.component == ScalarType::Uint ? 3 : 1;
+            VkDescriptorImageInfo ii = {dummy_sampler(), dummy_view(view_type_for(b), b.image.depth, component), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
             TexResolved r = resolve_texture(d);
             if (r.tex && !g_fb_use.empty()) {
                 const auto fb = g_fb_use.find(r.tex);
