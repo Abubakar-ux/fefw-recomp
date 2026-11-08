@@ -60,6 +60,7 @@ struct Info {
     const char* game_ini = "";              // the settings file the setup tool writes and the game exe reads: "mpr.ini"
     const char* shader_pack = "";           // the shader pack file next to the setup tool: "shader_cache.mprshc"
     const char* save_folder = "";           // save data folder under %APPDATA%: "MPRRecomp" (empty: "nxrt")
+    const char* jc2_mouse_default = "";     // [input] jc2_mouse when the ini does not set it: "off" (empty: "auto")
 
     // ---- tables (null = the feature is off) ----
     void (*title_defaults)(services::TitleProfile& p) = nullptr;

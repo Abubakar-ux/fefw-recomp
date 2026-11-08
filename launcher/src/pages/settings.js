@@ -59,7 +59,7 @@ const SECTIONS = [
   {
     title: 'Input, saves and log', icon: 'folder', file: 'game',
     fields: [
-      { id: 'jc2_mouse', type: 'select', label: 'Joy-Con 2 mouse from the PC mouse', sec: 'input', key: 'jc2_mouse', def: 'auto', options: [['auto', 'Automatic'], ['on', 'On'], ['off', 'Off']] },
+      { id: 'jc2_mouse', type: 'select', label: 'Joy-Con 2 mouse from the PC mouse', sec: 'input', key: 'jc2_mouse', def: 'off', options: [['auto', 'Automatic'], ['on', 'On'], ['off', 'Off']] },
       { id: 'save_dir', type: 'path', label: 'Save folder', sec: 'fs', key: 'save_dir', def: '', placeholder: 'save/ in the run folder' },
       { id: 'log_level', type: 'select', label: 'Log detail', sec: 'log', key: 'level', def: 'info', options: [['error', 'Errors'], ['warn', 'Warnings'], ['info', 'Normal'], ['debug', 'Debug']] },
     ],
