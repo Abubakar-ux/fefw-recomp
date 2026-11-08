@@ -228,7 +228,7 @@ fn textures_ok(p: &Paths) -> bool {
     p.repo.join("tools").join("textures").join("third_party").join("astc-encoder").join("Source").join("astcenc.h").is_file()
 }
 
-const SHADER_TRANSLATOR_VERSION: u32 = 2; // portable 32-lane warps
+const SHADER_TRANSLATOR_VERSION: u32 = 2; // portable 32-lane warps (game-build/release/fefw_build.py has the same number)
 
 fn shaders_ok(p: &Paths) -> bool {
     let stamp = fs::read_to_string(p.shader_stamp()).unwrap_or_default();

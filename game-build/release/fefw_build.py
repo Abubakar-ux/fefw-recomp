@@ -110,6 +110,10 @@ def tree_hash(root, rels):
     return h.hexdigest()
 
 
+# The launcher's SHADER_TRANSLATOR_VERSION (launcher/src-tauri/src/setup.rs): keep the two equal.
+SHADER_TRANSLATOR_VERSION = 2
+
+
 def tool_stamp():
     """The part of the build stamp this package decides: a release that changes any of it rebuilds fefw.exe."""
     return {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
@@ -129,6 +133,9 @@ def check(game):
     changed = [k for k in want if done['tools'].get(k) != want[k]]
     if changed:
         return False, 'this release changes ' + ', '.join(changed)
+    shaders = read_json(os.path.join(game, 'shader_cache', 'setup.json'))
+    if isinstance(shaders, dict) and shaders.get('translator_version') != SHADER_TRANSLATOR_VERSION:
+        return False, 'this release changes the shader translator (shaders are translated again)'
     return True, 'fefw.exe matches this release'
 
 
