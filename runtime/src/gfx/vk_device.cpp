@@ -37,41 +37,6 @@ PFN_vkAllocateMemory driver_allocate_memory;
 PFN_vkFreeMemory driver_free_memory;
 std::mutex memory_count_mu;
 std::unordered_map<VkDeviceMemory, VkDeviceSize> memory_sizes;
-// Diagnostics (test build): which memory type a failed allocation asked for, its heap's budget, and the pNext chain.
-VkPhysicalDevice g_phys = VK_NULL_HANDLE;
-bool g_budget_ext = false;
-void log_memory_layout() {
-    if (!g_phys) return;
-    VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
-    VkPhysicalDeviceMemoryProperties2 mp2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, g_budget_ext ? &bp : nullptr};
-    vkGetPhysicalDeviceMemoryProperties2(g_phys, &mp2);
-    const VkPhysicalDeviceMemoryProperties& mp = mp2.memoryProperties;
-    for (uint32_t h = 0; h < mp.memoryHeapCount; ++h)
-        NXLOG_I("vk.memory", "diag: heap %u: %llu MiB, flags 0x%x, budget %llu MiB, usage %llu MiB", h,
-                (unsigned long long)(mp.memoryHeaps[h].size >> 20), mp.memoryHeaps[h].flags, (unsigned long long)(bp.heapBudget[h] >> 20),
-                (unsigned long long)(bp.heapUsage[h] >> 20));
-    for (uint32_t t = 0; t < mp.memoryTypeCount; ++t)
-        NXLOG_I("vk.memory", "diag: type %u: heap %u, flags 0x%x", t, mp.memoryTypes[t].heapIndex, mp.memoryTypes[t].propertyFlags);
-}
-void log_failure_detail(const VkMemoryAllocateInfo* info) {
-    static std::atomic<int> n{0};
-    const int k = n.fetch_add(1);
-    if (k >= 60 || !g_phys) return;
-    VkPhysicalDeviceMemoryBudgetPropertiesEXT bp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
-    VkPhysicalDeviceMemoryProperties2 mp2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, g_budget_ext ? &bp : nullptr};
-    vkGetPhysicalDeviceMemoryProperties2(g_phys, &mp2);
-    const VkPhysicalDeviceMemoryProperties& mp = mp2.memoryProperties;
-    const uint32_t t = info->memoryTypeIndex;
-    const uint32_t h = t < mp.memoryTypeCount ? mp.memoryTypes[t].heapIndex : 0;
-    char chain[160] = "";
-    size_t used = 0;
-    for (auto* p = static_cast<const VkBaseInStructure*>(info->pNext); p && used + 16 < sizeof chain; p = p->pNext)
-        used += std::snprintf(chain + used, sizeof chain - used, " %d", static_cast<int>(p->sType));
-    NXLOG_W("vk.memory", "diag: failed type %u (flags 0x%x), heap %u (%llu MiB, budget %llu MiB, usage %llu MiB), pNext sTypes:%s", t,
-            t < mp.memoryTypeCount ? mp.memoryTypes[t].propertyFlags : 0u, h, (unsigned long long)(mp.memoryHeaps[h].size >> 20),
-            (unsigned long long)(bp.heapBudget[h] >> 20), (unsigned long long)(bp.heapUsage[h] >> 20), used ? chain : " none");
-    if (k == 0) log_memory_layout();
-}
 VKAPI_ATTR VkResult VKAPI_CALL counted_allocate_memory(VkDevice d, const VkMemoryAllocateInfo* info,
                                                       const VkAllocationCallbacks* cb, VkDeviceMemory* out) {
     *out = VK_NULL_HANDLE;
@@ -89,7 +54,6 @@ VKAPI_ATTR VkResult VKAPI_CALL counted_allocate_memory(VkDevice d, const VkMemor
         *out = VK_NULL_HANDLE;
         NXLOG_E("vk.memory", "allocation failed (%d), bytes %llu, live %lld", int(r),
                 (unsigned long long)info->allocationSize, (long long)vk_gauge_memory_allocs().get());
-        log_failure_detail(info);
     }
     return r;
 }
@@ -843,9 +807,6 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     volkLoadDevice(device_);
     driver_allocate_memory = vkAllocateMemory;
     driver_free_memory = vkFreeMemory;
-    g_phys = physical_;
-    g_budget_ext = x_budget;
-    log_memory_layout();
     vkAllocateMemory = counted_allocate_memory;
     vkFreeMemory = counted_free_memory;
     NXLOG_I(kTag, "memory limits: maxMemoryAllocationCount %u, minImportedHostPointerAlignment %llu, external host %d",
