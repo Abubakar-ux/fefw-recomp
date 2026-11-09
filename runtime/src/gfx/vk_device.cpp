@@ -1070,15 +1070,30 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     if (use == MemoryUse::Readback) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info = {};
     Buffer b;
-    // host-visible buffers first in a memory type whose heap has budget left, so a full BAR heap is passed over without a failing
-    // vkAllocateMemory; when no heap has budget, as before
-    VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    // Without resizable BAR the device-local host-visible heap is ~256 MB and fills at start; VMA prefers it for host-visible buffers and
+    // the driver refuses it while its budget still shows a few MB, so each buffer cost a failing vkAllocateMemory. Leave such a small heap
+    // out once it is nearly full (as before when nothing else fits).
     if (use == MemoryUse::Upload || use == MemoryUse::Readback) {
-        VmaAllocationCreateInfo within = ai;
-        within.flags |= VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
-        r = vmaCreateBuffer(vma_, &bi, &within, &b.buffer, &b.allocation, &info);
+        constexpr VkDeviceSize kSmallHeap = 1ull << 30, kHeadroom = 32ull << 20;
+        const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+        vmaGetMemoryProperties(vma_, &mp);
+        VmaBudget budget[VK_MAX_MEMORY_HEAPS] = {};
+        vmaGetHeapBudgets(vma_, budget);
+        uint32_t skip = 0;
+        for (uint32_t t = 0; mp && t < mp->memoryTypeCount; ++t) {
+            const VkMemoryType& mt = mp->memoryTypes[t];
+            const VmaBudget& hb = budget[mt.heapIndex];
+            const bool bar = (mt.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (mt.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                             mp->memoryHeaps[mt.heapIndex].size < kSmallHeap;
+            if (bar && hb.usage + size + kHeadroom > hb.budget) skip |= 1u << t;
+        }
+        if (skip) ai.memoryTypeBits = ~skip;
     }
-    if (r != VK_SUCCESS) r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    if (r != VK_SUCCESS && ai.memoryTypeBits != 0) {
+        ai.memoryTypeBits = 0;   // no restriction
+        r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    }
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
     if (use == MemoryUse::Upload || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
