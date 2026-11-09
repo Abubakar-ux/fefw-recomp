@@ -77,6 +77,11 @@ const SECTIONS = [
       { id: 'prompt_style', type: 'select', label: 'Button prompts', sec: 'prompts', key: 'style', def: 'auto',
         options: [['auto', 'Automatic (last device used)'], ['switch', "Switch (the game's own)"], ['xbox', 'Xbox'], ['playstation', 'PlayStation'], ['keyboard', 'Keyboard and mouse']],
         hint: 'Keyboard: WASD move, arrows or IJKL camera, Enter or Space A, Esc or Backspace B, R X, F Y, Q L, E R, Z ZL, C ZR, Tab +, M -, 1-4 d-pad. F1 > Controls lists them; change them in [bindings.all] of controls.ini.' },
+      // The runtime already swaps the face buttons ([pad] label_abxy in controls.ini, pad_map.cpp): 1 keeps the printed
+      // labels, 0 follows the positions. The prompts follow the same key, so no extra rule is needed here.
+      { id: 'confirm_btn', type: 'select', label: 'Confirm button', sec: 'pad', key: 'label_abxy', def: '1',
+        options: [['1', 'Xbox (label): A confirms'], ['0', 'PlayStation (position): circle confirms, cross cancels']],
+        hint: 'Swaps confirm and cancel for the Switch, Xbox and PlayStation prompts alike; the mapped input changes with it. Keyboard bindings are not affected.' },
     ],
   },
   {
