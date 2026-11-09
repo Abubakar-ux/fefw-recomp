@@ -105,18 +105,6 @@ switch a key off. An older `controls.ini` gets the keys above added at the next 
 old file is kept as `controls.ini.bak`). To go back to the default keys, delete the `[bindings.*]` sections. Controller options (stick dead zones,
 button mapping, prompts) are under **Settings** and **F1 > Controls**.
 
-### Moving saves from an emulator
-
-Close the game, then copy what is inside the game's save folder in your emulator (Eden, Eglantine and Ryujinx can all open it from
-the game's right-click menu; in Ryujinx it is the `0` folder inside) into
-
-```
-save\account\0100000000000000706d635257464546\
-```
-
-next to the launcher. That folder is created when the game first saves, so start the game and save once if it is not there yet. The
-save slots are the files in its `000` folder. Keep a copy of the emulator's folder first.
-
 ### DLC
 
 DLC is used when you dump it from your own copy, like the game. Put each add-on in `dlc\<title id>\romfs` of your dump folder (next
