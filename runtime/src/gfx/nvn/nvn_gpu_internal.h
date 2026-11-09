@@ -328,6 +328,12 @@ bool keep_aspect();
 // After a traced frame ([nvn] trace_frame): dumps the targets it drew to (PNG next to the log: trace_<texture id>_<format>.png) and logs their statistics.
 void trace_dump_targets();
 
+// Coherent copy fallback for rejected host imports. Completion includes copy-back to guest memory.
+void pool_copy_retire(PoolGpu*);
+bool pool_copy_pending();
+void pool_copy_begin();
+void pool_copy_end();
+
 // ---- present -----------------------------------------------------------------------------------------------------------
 void present_on_render_thread(Window* w, int index, bool again = false);   // again: present_again (not counted as a game present)
 void present_again();
