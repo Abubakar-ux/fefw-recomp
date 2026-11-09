@@ -30,6 +30,7 @@
 #include "nxrt/nvn.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
+#include "extras/framegen.h"
 #include "extras/overlay_composite.h"
 #include "fps_stats.h"
 
@@ -984,7 +985,10 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
     const int detail = counter_detail.load(std::memory_order_relaxed);
     char buf[64];
     counter_n = 0;
-    if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps);
+    // with frame generation the game's own rate plus what reaches the screen (the generated frames are made after this counter sees one)
+    const float shown = extras::framegen_shown_ratio();
+    if (snap.valid && shown > 1.05f) std::snprintf(buf, sizeof buf, "%.0f FPS, %.0f shown", snap.fps, snap.fps * shown);
+    else if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps);
     else std::snprintf(buf, sizeof buf, "-- FPS");
     counter_lines[counter_n++] = buf;
     if (detail >= 1) {
