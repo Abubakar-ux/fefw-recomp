@@ -1015,7 +1015,8 @@ VkImageView view_for(TexGpu& g, VkImageViewType type, uint32_t base_level, uint3
 
 VkImageView bad_view(const Texture& t, const char* what) {
     if (first_time("view " + std::to_string(t.id) + " " + what))
-        NXLOG_W(kTag, "texture %u: view not possible (%s): the binding gets the dummy view", t.id, what);
+        NXLOG_W(kTag, "texture %u (%s, target %d, %dx%dx%d, %u layers): view not possible (%s): the binding gets the dummy view", t.id,
+                t.fmt ? t.fmt->name : "?", t.b.target, t.b.width, t.b.height, t.b.depth, t.layers, what);
     return VK_NULL_HANDLE;
 }
 
@@ -1959,6 +1960,18 @@ VkImageView tex_sampled_view(Texture* t, const ViewRequest& req) {
     }
     if (!feature->second) return bad_view(*t, "view format does not support sampling");
     return view_for(*g, req.type, bl, nl, bly, nly, fmt, asp, req.swizzle);
+}
+
+uint8_t tex_int_sampler_component(Texture* t, VkFormat requested) {
+    TexGpu* g = tex_or_null(t);
+    if (!g || g->aspect != VK_IMAGE_ASPECT_COLOR_BIT) return 0;
+    const VkFormat fmt = requested == VK_FORMAT_UNDEFINED ? g->format : promoted_view_format(*g, requested);
+    if (!vk_format_is_integer(fmt) || !format_view_ok(*g, fmt)) return 0;
+    if (g->mutable_fmt) {                        // a 32-bit integer format: its float alias already gives a float shader the bits
+        const VkFormat a = float_alias(fmt);
+        if (a != VK_FORMAT_UNDEFINED && format_view_ok(*g, a)) return 0;
+    }
+    return vk_format_is_signed_int(fmt) ? 2 : 3;
 }
 
 VkImageView tex_attachment_view(Texture* t, uint32_t level, uint32_t layer, uint32_t layer_count, VkFormat view_format) {
