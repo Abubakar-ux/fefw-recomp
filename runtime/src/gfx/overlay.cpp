@@ -232,7 +232,7 @@ struct Overlay::Impl {
     FpsStats stats;
     double text_s = -1e9;                 // time of the last text refresh, seconds (far past: refresh at once)
     FpsStats::Snapshot snap;              // the snapshot taken at text_s
-    std::string counter_lines[4];
+    std::string counter_lines[5];
     int counter_n = 0;
 
     void build_ui();
@@ -985,15 +985,20 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
     const int detail = counter_detail.load(std::memory_order_relaxed);
     char buf[64];
     counter_n = 0;
-    // with frame generation the game's own rate plus what reaches the screen (the generated frames are made after this counter sees one)
-    const float shown = extras::framegen_shown_ratio();
-    if (snap.valid && shown > 1.05f) std::snprintf(buf, sizeof buf, "%.0f FPS, %.0f shown", snap.fps, snap.fps * shown);
-    else if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps);
+    // With frame generation the frames that reach the screen: this counter sees the game's own frames only, the generated ones are made
+    // after it. The most detailed view adds the game's own rate.
+    const float ratio = extras::framegen_shown_ratio();
+    const double shown = ratio > 1.05f ? ratio : 1.0;
+    if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps * shown);
     else std::snprintf(buf, sizeof buf, "-- FPS");
     counter_lines[counter_n++] = buf;
     if (detail >= 1) {
-        if (snap.valid) std::snprintf(buf, sizeof buf, "%.1f ms", snap.avg_ms);
+        if (snap.valid) std::snprintf(buf, sizeof buf, "%.1f ms", snap.avg_ms / shown);
         else std::snprintf(buf, sizeof buf, "-- ms");
+        counter_lines[counter_n++] = buf;
+    }
+    if (detail >= 2 && shown > 1.0 && snap.valid) {
+        std::snprintf(buf, sizeof buf, "%.0f real", snap.fps);
         counter_lines[counter_n++] = buf;
     }
     if (detail >= 2) {
