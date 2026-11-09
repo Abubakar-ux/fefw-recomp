@@ -651,6 +651,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_aal = !headless && add_ext(VK_AMD_ANTI_LAG_EXTENSION_NAME, &aal);
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    // heap budgets for VMA: without them it keeps trying a full heap (the 256 MB BAR heap without resizable BAR) before the next one
+    const bool x_budget = has_dext(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    if (x_budget) dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
     // robust access per pipeline, for the translated shaders' uniform buffers only (nvn_pipeline.cpp ubo_robustness); robustness2 is
     // enabled for its pipeline behaviour, not its device-wide features (left off: they cost speed)
@@ -828,6 +831,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     aci.instance = instance_;
     aci.vulkanApiVersion = VK_API_VERSION_1_3;
     aci.pVulkanFunctions = &vf;
+    if (x_budget) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     r = vmaCreateAllocator(&aci, &vma_);
     if (r != VK_SUCCESS) return fail("vmaCreateAllocator failed (" + std::to_string(r) + ")");
     register_vma_gauges(vma_, props_.deviceType);
@@ -1027,7 +1031,15 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     if (use == MemoryUse::Readback) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info = {};
     Buffer b;
-    VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    // host-visible buffers first in a memory type whose heap has budget left, so a full BAR heap is passed over without a failing
+    // vkAllocateMemory; when no heap has budget, as before
+    VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (use == MemoryUse::Upload || use == MemoryUse::Readback) {
+        VmaAllocationCreateInfo within = ai;
+        within.flags |= VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        r = vmaCreateBuffer(vma_, &bi, &within, &b.buffer, &b.allocation, &info);
+    }
+    if (r != VK_SUCCESS) r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
     if (use == MemoryUse::Upload || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
