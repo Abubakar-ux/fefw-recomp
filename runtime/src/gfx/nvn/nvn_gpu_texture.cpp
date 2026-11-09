@@ -69,6 +69,7 @@ struct TexGpu {
     bool depth = false;                                 // depth and/or stencil aspect
     bool uploaded = false;                              // the image holds the storage's content (or the black fallback)
     bool gpu_written = false;                           // rendered by the GPU since the CPU last wrote the storage
+    bool presented = false;                             // also read by the renderer, outside the NVN submission timeline
     float scale = 1.0f;                                 // resolution scale: base is the NVN size times this ([gfx] render_scale, render targets only)
     bool scale_blocked = false;                         // was scaled, brought back to 1 (bound as a storage image, or paired with an unscaled target)
     std::map<std::array<uint32_t, 12>, VkImageView> views;
@@ -1454,6 +1455,10 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
         nl = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
     gfx::Image old = g->img;
+    // The renderer samples window images in its own submission. Finishing the
+    // NVN serial alone does not retire those reads (notably boot's window swap).
+    if (g->presented) device().wait_idle();
+    g->presented = false;
     std::vector<VkImageView> views;
     for (auto& kv : g->views) views.push_back(kv.second);
     g->views.clear();
@@ -1993,6 +1998,7 @@ VkImageLayout tex_sampled_layout(Texture* t) {
 VkImageView tex_present_view(Texture* t) {
     TexGpu* g = tex_or_null(t);
     if (!g) return VK_NULL_HANDLE;
+    g->presented = true;
     // The UNORM alias of an sRGB image; the plain view when the image cannot be viewed as UNORM.
     const VkFormat fmt = (g->mutable_fmt && is_srgb(g->format)) ? srgb_partner(g->format) : g->format;
     return view_for(*g, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1, fmt, g->aspect, kIdentity);
@@ -2127,6 +2133,7 @@ void tex_destroy(TexGpu* g) {
         if (!g_live_set.erase(g)) return;   // already destroyed by tex_shutdown
     }
     g_gauge_textures_live.sub(1);
+    if (g->presented) device().wait_idle();
     for (auto& kv : g->views) { vkDestroyImageView(vkdev(), kv.second, nullptr); vk_gauge_image_views().sub(1); }
     g->views.clear();
     if (g->img) g_live_images.fetch_sub(1);

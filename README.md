@@ -14,6 +14,7 @@ software and draws with Vulkan. It is not an emulator.
 
 - Runs natively on Windows, with no emulator in between
 - 60 or 120 FPS modes, any output resolution, render scale and a temporal upscaler
+- Ultrawide (21:9, 32:9 or any wider shape): a wider view with the menus and HUD kept at 16:9 in the centre
 - Windowed, borderless or fullscreen
 - Keyboard and mouse or any controller, with matching button prompts
 - An in-game settings overlay (**F1**)
@@ -43,6 +44,58 @@ Your saves are in the `save\` folder next to the launcher.
 
 The launcher's **Settings** page covers resolution, frame rate, upscaling, window mode, sound and controls. Press **F1** in game for
 the overlay. Every option is described in [runtime/docs/CONFIG.md](runtime/docs/CONFIG.md).
+
+### Game language
+
+**Settings > Language** (or **F1 > Game**) picks the language of the game's text and voices: Japanese, English (US or UK), French,
+German, Italian, Spanish, Korean and Chinese (Simplified or Traditional). *Automatic*, the default, follows your Windows display
+language and uses English when the game has no translation for it. The change applies the next time the game starts.
+
+### DLSS (NVIDIA RTX only)
+
+NVIDIA's files cannot be shipped here, so DLSS stays off until you add them. Take them from NVIDIA's
+[Streamline SDK](https://github.com/NVIDIAGameWorks/Streamline) (v2.x, the `bin/x64` folder of the release, not the development one) and
+put these four files in a folder named `upscalers\streamline` next to `fefw-launcher.exe`:
+
+```
+sl.interposer.dll   sl.common.dll   sl.dlss.dll   nvngx_dlss.dll
+```
+
+Then choose **DLSS** (or **Automatic**, which picks DLSS when the files and an RTX GPU are there) as the Upscaler in **Settings**, and
+restart the game. `fefw.log` says `Streamline ... started` and `DLSS (Streamline)` when it works. The folder can be somewhere else:
+set it under **Settings > Picture > DLSS (Streamline) folder**.
+
+### Keyboard and controller
+
+Any controller works, and the button prompts follow the one you last used. This release binds no keyboard keys by default, so the
+keyboard only opens the **F1** menu until you add some. To play with the keyboard, close the game and add lines like these to
+`controls.ini` in the run folder (the game creates it on its first start), under `[bindings.all]`:
+
+```
+[bindings.all]
+W = move_forward
+S = move_back
+A = move_left
+D = move_right
+Return = btn_a
+Backspace = btn_b
+```
+
+Left side: a key name (`Return`, `Space`, `Left Shift`, `Up` ...). Right side: `move_*`, `look_*`, `dpad_*`, `btn_a`, `btn_b`, `btn_x`,
+`btn_y`, `btn_l`, `btn_r`, `btn_zl`, `btn_zr`, `btn_plus` or `btn_minus`. Controller options (stick dead zones, button mapping,
+prompts) are under **Settings** and **F1 > Controls**.
+
+### Moving saves from an emulator
+
+Close the game, then copy what is inside the game's save folder in your emulator (Eden, Eglantine and Ryujinx can all open it from
+the game's right-click menu; in Ryujinx it is the `0` folder inside) into
+
+```
+save\account\0100000000000000706d635257464546\
+```
+
+next to the launcher. That folder is created when the game first saves, so start the game and save once if it is not there yet. The
+save slots are the files in its `000` folder. Keep a copy of the emulator's folder first.
 
 ### Updating to a new release
 
@@ -75,6 +128,8 @@ This project stands on the work of others. Thank you.
 - [drakolordx7/switch2-recomp](https://github.com/drakolordx7/switch2-recomp): the launcher design this launcher follows.
 - [nxnative-penis6](https://git.eden-emu.dev/penis6/nxnative-penis6) by seedds (MIT): the movie decoder front end, its dav1d copy and
   several hardware facts (notices in `runtime/THIRD_PARTY_NOTICES.md`).
+- [Kompas9's Switch-Game-Patches](https://github.com/Kompas9/Switch-Game-Patches) (MIT): the Fortune's Weave ultrawide patch, whose sites and
+  findings `[fefw] ultrawide` re-implements as runtime hooks.
 - [Ryujinx / Ryubing](https://git.ryujinx.app/ryubing/ryujinx) (MIT): the shader translator and tiling code; [Mesa](https://gitlab.freedesktop.org/mesa/mesa) NAK (MIT).
 - SuperMarioWonderRecomp (MIT); smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0); [yuzu and Eden](https://git.eden-emu.dev/eden-emu/eden)
   (GPL); libnx (ISC); LLVM libc++abi (Apache-2.0 with LLVM exceptions).
