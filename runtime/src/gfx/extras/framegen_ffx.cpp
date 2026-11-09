@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <atomic>
+#include <cfloat>
 #include <cstdio>
 #include <mutex>
 #include <vector>
@@ -308,6 +309,31 @@ int64_t dump_every() {
     return v;
 }
 
+// The camera FSR 3 frame generation is told about (#20). The game's DLSS call carries no camera, so these stay estimates; FSR uses them to
+// linearise depth for its disocclusion mask, and values far from the game's camera show as flicker at the edges of moving objects.
+struct FgCamera {
+    float near_z = 0.1f, far_z = 1000.0f, fov_y = 1.0f;   // far 0: infinite far plane
+    bool jitter_mv = false;                               // the motion vectors include the jitter
+    bool debug = false;                                   // FSR's debug view in the generated frames
+};
+const FgCamera& fg_camera() {
+    static const FgCamera c = [] {
+        FgCamera r;
+        r.near_z = static_cast<float>(std::max(config_get_double("dlss", "fsr_fg_near", 0.1), 1e-4));
+        r.far_z = static_cast<float>(std::max(config_get_double("dlss", "fsr_fg_far", 1000.0), 0.0));
+        if (r.far_z > 0 && r.far_z <= r.near_z) r.far_z = r.near_z * 10.0f;
+        r.fov_y = static_cast<float>(std::clamp(config_get_double("dlss", "fsr_fg_fov", 57.3), 10.0, 150.0) * 0.017453292519943295);
+        r.jitter_mv = config_get_bool("dlss", "fsr_fg_jitter_mv", false);
+        r.debug = config_get_bool("dlss", "fsr_fg_debug", false);
+        const std::string far_text = r.far_z > 0 ? std::to_string(r.far_z) : std::string("infinite");
+        NXLOG_I(kTag, "FSR 3 frame generation camera: near %.3f, far %s, vertical fov %.1f deg, jittered motion vectors %d%s",
+                static_cast<double>(r.near_z), far_text.c_str(), static_cast<double>(r.fov_y) * 57.29578, r.jitter_mv ? 1 : 0,
+                r.debug ? ", debug view" : "");
+        return r;
+    }();
+    return c;
+}
+
 // Render thread: arm a dump every N frames (4 at most), write the PNGs once the frames are surely done.
 void dump_tick(Ffx& f, VkExtent2D bb, VkFormat fmt) {
     if (dump_every() <= 0) return;
@@ -393,7 +419,10 @@ bool ensure_fg_context(const FfxFgFrame& fr) {
     cd.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
     cd.header.pNext = &be.header;
     be.header.pNext = &hd.header;
-    cd.flags = (fr.depth_inverted ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0u) | FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING;
+    const FgCamera& cam = fg_camera();
+    cd.flags = (fr.depth_inverted ? FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED : 0u) | FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING |
+               (cam.far_z > 0 ? 0u : FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE) |
+               (cam.jitter_mv ? FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION : 0u);
     cd.displaySize = {fr.bb.width, fr.bb.height};
     const VkExtent2D mx{std::max(fr.render.width, fr.bb.width), std::max(fr.render.height, fr.bb.height)};
     cd.maxRenderSize = {mx.width, mx.height};
@@ -487,7 +516,7 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
     c.allowAsyncWorkloads = false;
     if (gen && fr.hudless)
         c.HUDLessColor = res(fr.hudless, ffxApiGetSurfaceFormatVK(f.format), fr.bb, FFX_API_RESOURCE_USAGE_READ_ONLY | FFX_API_RESOURCE_USAGE_RENDERTARGET);
-    c.flags = 0;
+    c.flags = fg_camera().debug ? FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_VIEW : 0u;
     c.onlyPresentGenerated = false;
     c.generationRect = {fr.rect[0], fr.rect[1], fr.rect[2], fr.rect[3]};
     c.frameID = f.frame_id;
@@ -514,9 +543,10 @@ bool ffx_fg_frame(VkCommandBuffer cb, const FfxFgFrame& fr) {
         p.motionVectorScale = {fr.mv_scale[0], fr.mv_scale[1]};
         p.frameTimeDelta = fr.frame_ms;
         p.unused_reset = fr.reset;
-        p.cameraNear = 0.1f;
-        p.cameraFar = 1000.0f;
-        p.cameraFovAngleVertical = 1.0f;
+        const FgCamera& camera = fg_camera();
+        p.cameraNear = camera.near_z;   // FSR orders near / far itself from the inverted-depth flag
+        p.cameraFar = camera.far_z > 0 ? camera.far_z : FLT_MAX;
+        p.cameraFovAngleVertical = camera.fov_y;
         p.viewSpaceToMetersFactor = 1.0f;
         p.depth = res(fr.depth, FFX_API_SURFACE_FORMAT_R32_FLOAT, fr.render, FFX_API_RESOURCE_USAGE_READ_ONLY | FFX_API_RESOURCE_USAGE_UAV);
         p.motionVectors = res(fr.motion, FFX_API_SURFACE_FORMAT_R16G16_FLOAT, fr.render, FFX_API_RESOURCE_USAGE_READ_ONLY | FFX_API_RESOURCE_USAGE_UAV);
