@@ -117,9 +117,22 @@ save\account\0100000000000000706d635257464546\
 next to the launcher. That folder is created when the game first saves, so start the game and save once if it is not there yet. The
 save slots are the files in its `000` folder. Keep a copy of the emulator's folder first.
 
+### DLC
+
+DLC is used when you dump it from your own copy, like the game. Put each add-on in `dlc\<title id>\romfs` of your dump folder (next
+to `exefs\` and `romfs\`, or next to `base\` and `updates\`). A `.nup` with add-ons is unpacked that way on its own. The **Play**
+page lists the DLC it found.
+
+### Mods
+
+RomFS mods go in the `mods\` folder next to the launcher (**Play** > **Open mods folder**), in the layout emulators use:
+`mods\<mod name>\romfs\...`. Files in a mod replace the game's files at the same path. If two mods change the same file, the mod
+whose name sorts last wins, so you can name them `01-...` and `02-...`. Rename a mod to start with `-` or `_` to turn it off. Code
+mods (exefs `.ips` / `.pchtxt` patches) do not work, because the game code is compiled ahead of time.
+
 ### Updating to a new release
 
-Extract the new zip to a new folder, copy your `save\` folder into it, and run **Set up** again.
+Extract the new zip to a new folder, copy your `save\` folder (and `mods\`, if you use mods) into it, and run **Set up** again.
 
 ## Troubleshooting
 
@@ -153,6 +166,8 @@ This project stands on the work of others. Thank you.
 - [Ryujinx / Ryubing](https://git.ryujinx.app/ryubing/ryujinx) (MIT): the shader translator and tiling code; [Mesa](https://gitlab.freedesktop.org/mesa/mesa) NAK (MIT).
 - SuperMarioWonderRecomp (MIT); smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0); [yuzu and Eden](https://git.eden-emu.dev/eden-emu/eden)
   (GPL); libnx (ISC); LLVM libc++abi (Apache-2.0 with LLVM exceptions).
+- [Hookshot](https://github.com/NotRexed/Hookshot) (GPL-3.0) and SkyboundTotk: the RomFS mod folder layout and rules followed here, so
+  mods work the same in both.
 - [zbic](https://github.com/kinnay/zbic) by Yannik Marchand (GPLv2; installed by pip at setup, not included here): ZBIC decompression.
 - [dav1d](https://code.videolan.org/videolan/dav1d) (BSD-2-Clause), [libvpx](https://chromium.googlesource.com/webm/libvpx) (BSD-3-Clause),
   [Zstandard](https://github.com/facebook/zstd) (BSD), [SDL3](https://github.com/libsdl-org/SDL) (zlib), volk, VulkanMemoryAllocator, Dear ImGui (MIT),

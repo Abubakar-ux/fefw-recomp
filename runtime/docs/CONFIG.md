@@ -207,6 +207,8 @@ Rules:
 | `account` | `nickname` | `Samus` | `NXRT_ACCOUNT_NICKNAME` | `src/services/common.cpp` | Nickname of the local user. |
 | `account` | `uid` | empty (`00000000000000014d50525265636f6d`) | `NXRT_ACCOUNT_UID` | `src/services/common.cpp` | Local user id as 32 hex digits. Anything that is not 32 hex digits keeps the default. |
 | `fs` | `romfs` | `game/romfs` | `NXRT_FS_ROMFS` | `src/services/common.cpp` | Host folder served as the game's RomFS, relative to the working directory. |
+| `fs` | `mods` | `mods` | `NXRT_FS_MODS` | `src/services/common.cpp` | Folder of RomFS mods, laid over the game's RomFS (LayeredFS style) in the layout emulators use: any folder below it (up to 4 levels) holding `romfs/` is a mod (`mods/<name>/romfs`, `mods/contents/<title id>/<name>/romfs`). A file at the same path replaces the game's, a new path is added; names match ignoring ASCII case. Mods are applied in the order of their paths, ignoring case: when two mods have the same file, the one sorted last wins (name them `01-...`, `02-...`). A folder whose name starts with `-` or `_` is off, and so is a folder named by another title's id. `exefs/` patches (`.ips`, `.pchtxt`) are not applied, because the code is compiled ahead of time (logged). Read once when the RomFS is first opened. Empty or missing folder: no mods. The launcher sets it to `<run folder>/mods`. |
+| `aoc` | `dir` | `game/dlc` | `NXRT_AOC_DIR` | `src/services/common.cpp` | Add-on content (DLC) the player dumped from their own copy: one folder per add-on named by its 16-hex-digit title id (`04007EF01F8AF001` = add-on 1), holding `romfs/` directly or in one numbered subfolder (`<id>/0/romfs`). aoc:u lists these, `OpenDataStorageByDataId` serves their RomFS. Only ids of this title count. Empty or missing folder: no add-on content. The launcher sets it to the dump's `dlc/` folder. |
 | `fs` | `save_dir` | empty (`%APPDATA%\MPRRecomp\save`) | `NXRT_FS_SAVE_DIR` | `src/services/common.cpp` | Folder for save data. Empty: the APPDATA default. |
 | `fs` | `exefs` | the build's `FEFW_EXEFS_DEFAULT` | `NXRT_FS_EXEFS` | `game-build/fefw/src/fefw_main.cpp` | fefw.exe: the ExeFS folder the six NSOs are mapped from (`--exefs` sets it too). |
 | `fs` | `main` | the build's `FEFW_MAIN_DEFAULT` | `NXRT_FS_MAIN` | `game-build/fefw/src/fefw_main.cpp` | fefw.exe: main as an uncompressed NSO (the console's main is ZBIC-compressed, which the NSO loader cannot read; fefw.exe refuses it). Empty: `<exefs>\main`. `--main` sets it too. |
@@ -529,6 +531,10 @@ nickname = Samus
 [fs]
 romfs = game/romfs
 ; save_dir =  (empty: %APPDATA%\MPRRecomp\save)
+mods = mods
+
+[aoc]
+dir = game/dlc
 
 [fatal]
 ; report_path is not listed: once set, even empty, it replaces the default report file.
