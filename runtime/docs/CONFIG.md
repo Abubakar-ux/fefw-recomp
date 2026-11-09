@@ -314,6 +314,31 @@ When the sink has a clock of its own (XAudio2, or `paced`), the audio renderer k
 
 While a sink is active, a line `sink <name>: queue avg A ms (min..max ms), underruns +N (total), dropped +D, written F frames/s (rate R)` is logged every `stats_interval` seconds. The queue is the audio waiting in the device, which is the output latency; `written` should match the rate (lower: the game is starved or the stream is stretched). When a sink closes, it writes one line to the log with its counters: frames written, accepted, dropped, underruns (times the device ran out of audio after playback had started) and the largest number of buffers queued at once.
 
+## Fortune's Weave keyboard keys (`controls.ini`, `[bindings.*]`)
+
+The factory keys (`games/fefw/fefw_game.cpp`, `kFactoryKeys`). Each one drives a Switch button or stick through the `[switch]` table; the stick keys push it all the way (two at once give a full diagonal). All of them are in `[bindings.all]`: the fefw module has no menu or play detection, so play mode's context stays `menu` and `[bindings.all]` is what applies everywhere.
+
+| Input | Action | Switch |
+|---|---|---|
+| `W` `S` `A` `D` | `move_forward` `move_back` `move_left` `move_right` | Left stick |
+| `Up` `Down` `Left` `Right`, `I` `K` `J` `L` | `look_up` `look_down` `look_left` `look_right` | Right stick |
+| `Return`, `Space`, `Keypad Enter` | `btn_a` | A |
+| `Escape`, `Backspace` | `btn_b` | B |
+| `R` | `btn_x` | X |
+| `F` | `btn_y` | Y |
+| `Q` / `E` | `btn_l` / `btn_r` | L / R |
+| `Z` / `C` | `btn_zl` / `btn_zr` | ZL / ZR |
+| `Tab` | `btn_plus` | + |
+| `M` | `btn_minus` | - |
+| `1` `2` `3` `4`, `Keypad 8` `Keypad 2` `Keypad 4` `Keypad 6` | `dpad_up` `dpad_down` `dpad_left` `dpad_right` | D-pad |
+| `V` / `B` | `btn_lstick` / `btn_rstick` | Stick clicks |
+
+None of them is a runtime key: `F1` (the settings overlay, `[gfx] overlay_key`), `F2` (`[fps] key`) and `Alt+Enter` (full screen) are handled before the bindings. The keyboard prompts (`[prompts] style` `keyboard`, or `auto` after a key press) show the first key listed for a button: Enter for A, Esc for B, Tab for +. **F1 > Controls > Keyboard** lists the keys in use.
+
+Defaults revision 1 added these keys. Before it the fefw module had no factory keys, and the `controls.ini` it wrote has empty `[bindings.*]` sections at `defaults_rev = 0`, so at the next start every key above that the file does not bind in `[bindings.all]` is added (see `[meta] defaults_rev` below), the old file is kept as `controls.ini.bak`, and the log says `controls.ini updated to defaults revision 1 (added: ...)`. A key a player bound themselves keeps their action. A file with no `[bindings.*]` section at all uses the factory keys as they are.
+
+The next section (beam and visor keys) describes Metroid Prime Remastered's factory keys; the mechanism it explains is the same.
+
 ## Keyboard beam and visor keys (`controls.ini`)
 
 These live in the play-mode file `controls.ini` (key `[play] controls`), not in `nxrt.ini`. The F1 settings page writes the same file.

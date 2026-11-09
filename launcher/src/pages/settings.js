@@ -75,7 +75,8 @@ const SECTIONS = [
       { id: 'volume', type: 'range', label: 'Master volume', sec: 'audio', key: 'volume', def: '1.0' },
       { id: 'mute_unfocused', type: 'toggle', label: 'Mute when the window is in the background', sec: 'audio', key: 'mute_unfocused', def: '0' },
       { id: 'prompt_style', type: 'select', label: 'Button prompts', sec: 'prompts', key: 'style', def: 'auto',
-        options: [['auto', 'Automatic (last device used)'], ['switch', "Switch (the game's own)"], ['xbox', 'Xbox'], ['playstation', 'PlayStation'], ['keyboard', 'Keyboard and mouse']] },
+        options: [['auto', 'Automatic (last device used)'], ['switch', "Switch (the game's own)"], ['xbox', 'Xbox'], ['playstation', 'PlayStation'], ['keyboard', 'Keyboard and mouse']],
+        hint: 'Keyboard: WASD move, arrows or IJKL camera, Enter or Space A, Esc or Backspace B, R X, F Y, Q L, E R, Z ZL, C ZR, Tab +, M -, 1-4 d-pad. F1 > Controls lists them; change them in [bindings.all] of controls.ini.' },
     ],
   },
   {

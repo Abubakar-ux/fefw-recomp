@@ -849,6 +849,61 @@ constexpr const char* kPromptNames[] = {"Switch (the game's own)", "Xbox", "Play
 
 uint64_t pad_choice_value(int c) { return c == 0 ? play::kPadDefault : c == 1 ? 0 : static_cast<uint64_t>(hid::btn(kPadChoiceBits[c - 2])); }
 
+// The keys of controls.ini's [bindings.*] sections, by the Switch button or stick they drive (read only: they are changed in the file).
+struct KeyRowName {
+    play::Act act;
+    const char* label;
+};
+constexpr KeyRowName kKeyRows[] = {
+    {play::Act::MoveForward, "Move up (left stick)"},  {play::Act::MoveBack, "Move down (left stick)"},
+    {play::Act::MoveLeft, "Move left (left stick)"},   {play::Act::MoveRight, "Move right (left stick)"},
+    {play::Act::LookUp, "Camera up (right stick)"},    {play::Act::LookDown, "Camera down (right stick)"},
+    {play::Act::LookLeft, "Camera left (right stick)"}, {play::Act::LookRight, "Camera right (right stick)"},
+    {play::Act::BtnA, "A"}, {play::Act::Confirm, "A"}, {play::Act::BtnB, "B"}, {play::Act::Back, "B"}, {play::Act::BtnX, "X"},
+    {play::Act::BtnY, "Y"}, {play::Act::BtnL, "L"}, {play::Act::BtnR, "R"}, {play::Act::BtnZL, "ZL"}, {play::Act::BtnZR, "ZR"},
+    {play::Act::BtnPlus, "+ (menu)"}, {play::Act::BtnMinus, "-"}, {play::Act::DpadUp, "D-pad up"}, {play::Act::DpadDown, "D-pad down"},
+    {play::Act::DpadLeft, "D-pad left"}, {play::Act::DpadRight, "D-pad right"}, {play::Act::BtnLStick, "Left stick click"},
+    {play::Act::BtnRStick, "Right stick click"},
+};
+
+void keyboard_section(Menu& m) {
+    section("Keyboard");
+    ImGui::TextWrapped("The keys each Switch button or stick has. To change them, close the game and edit [bindings.all] in controls.ini.");
+    if (!begin_rows("keys")) return;
+    std::vector<std::pair<std::string, std::string>> rows;   // label, keys
+    auto add = [&](const std::string& label, const std::string& key) {
+        for (auto& r : rows)
+            if (r.first == label) {
+                r.second += ", " + key;
+                return;
+            }
+        rows.push_back({label, key});
+    };
+    for (const KeyRowName& k : kKeyRows)
+        for (const play::Binding& b : m.edit.bindings)
+            if (b.act == k.act) {
+                std::string key = play::input_name(b.in);
+                if (b.ctx != play::Ctx::All) key += std::string(" (") + play::ctx_name(b.ctx) + ")";
+                add(k.label, key);
+            }
+    for (const play::Binding& b : m.edit.bindings) {   // anything else bound (by its settings-file name)
+        bool listed = b.act == play::Act::None;
+        for (const KeyRowName& k : kKeyRows) listed |= k.act == b.act;
+        if (!listed) add(play::act_info(b.act).name, play::input_name(b.in));
+    }
+    for (const auto& [label, keys] : rows) {
+        row(m, label.c_str(), When::Info, nullptr);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(keys.c_str());
+    }
+    if (rows.empty()) {
+        row(m, "No keys bound", When::Info, nullptr);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("[bindings.all] in controls.ini");
+    }
+    end_rows();
+}
+
 void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
     play::PadSettings& p = m.edit.pad;
     section("Controller");
@@ -906,6 +961,7 @@ void controls_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
         for (uint64_t& v : p.remap) v = play::kPadDefault;
         apply(host, m);
     }
+    keyboard_section(m);
     ImGui::Spacing();
     ImGui::TextDisabled("This menu: F1, or Minus and Plus together on the pad. The game gets no input while it is open.");
 }

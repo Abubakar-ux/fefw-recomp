@@ -16,7 +16,7 @@ software and draws with Vulkan. It is not an emulator.
 - 60 or 120 FPS modes, any output resolution, render scale and a temporal upscaler
 - Ultrawide (21:9, 32:9 or any wider shape): a wider view with the menus and HUD kept at 16:9 in the centre
 - Windowed, borderless or fullscreen
-- Keyboard and mouse or any controller, with matching button prompts
+- Keyboard or any controller, with matching button prompts
 - An in-game settings overlay (**F1**)
 - A launcher that sets everything up from your dump, with nothing else to install
 
@@ -67,23 +67,43 @@ set it under **Settings > Picture > DLSS (Streamline) folder**.
 
 ### Keyboard and controller
 
-Any controller works, and the button prompts follow the one you last used. This release binds no keyboard keys by default, so the
-keyboard only opens the **F1** menu until you add some. To play with the keyboard, close the game and add lines like these to
-`controls.ini` in the run folder (the game creates it on its first start), under `[bindings.all]`:
+Any controller works, and so does the keyboard, with no setup. The button prompts in the game follow the one you used last: press a
+key and they show keys, touch the controller and they show its buttons. The keyboard drives the Switch buttons the game knows:
+
+| Keys | Switch | |
+|---|---|---|
+| W A S D | Left stick | Move |
+| Arrow keys, I J K L | Right stick | Camera |
+| Enter, Space | A | Confirm |
+| Esc, Backspace | B | Back |
+| R | X | |
+| F | Y | |
+| Q / E | L / R | E: dash in town |
+| Z / C | ZL / ZR | C: map in town |
+| Tab | + | Menu |
+| M | - | |
+| 1 2 3 4, or numpad 8 2 4 6 | D-pad up, down, left, right | |
+| V / B | Left / right stick click | |
+
+The movement keys push the stick all the way. **F1** (settings), **F2** (frame rate counter) and **Alt+Enter** (full screen) are
+the runtime's own keys. **F1 > Controls** lists the keys as they are now.
+
+To change a key, close the game and edit `[bindings.all]` in `controls.ini` in the run folder (the game creates it on its first
+start). Each line is `key = action`:
 
 ```
 [bindings.all]
 W = move_forward
-S = move_back
-A = move_left
-D = move_right
 Return = btn_a
-Backspace = btn_b
+G = btn_x
+X = none
 ```
 
-Left side: a key name (`Return`, `Space`, `Left Shift`, `Up` ...). Right side: `move_*`, `look_*`, `dpad_*`, `btn_a`, `btn_b`, `btn_x`,
-`btn_y`, `btn_l`, `btn_r`, `btn_zl`, `btn_zr`, `btn_plus` or `btn_minus`. Controller options (stick dead zones, button mapping,
-prompts) are under **Settings** and **F1 > Controls**.
+Left side: a key name (`Return`, `Space`, `Left Shift`, `Up`, `Keypad 8` ...). Right side: `move_*`, `look_*`, `dpad_*`, `btn_a`,
+`btn_b`, `btn_x`, `btn_y`, `btn_l`, `btn_r`, `btn_zl`, `btn_zr`, `btn_plus`, `btn_minus`, `btn_lstick`, `btn_rstick`, or `none` to
+switch a key off. An older `controls.ini` gets the keys above added at the next start (only keys you have not bound yourself; the
+old file is kept as `controls.ini.bak`). To go back to the default keys, delete the `[bindings.*]` sections. Controller options (stick dead zones,
+button mapping, prompts) are under **Settings** and **F1 > Controls**.
 
 ### Moving saves from an emulator
 
