@@ -986,9 +986,10 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
     char buf[64];
     counter_n = 0;
     // With frame generation the frames that reach the screen: this counter sees the game's own frames only, the generated ones are made
-    // after it. The most detailed view adds the game's own rate.
+    // after it. The most detailed view adds the game's own rate, and its 1% low and worst frame (measured on the game's frames) say so.
     const float ratio = extras::framegen_shown_ratio();
     const double shown = ratio > 1.05f ? ratio : 1.0;
+    const char* real = shown > 1.0 ? "real " : "";
     if (snap.valid) std::snprintf(buf, sizeof buf, "%.0f FPS", snap.fps * shown);
     else std::snprintf(buf, sizeof buf, "-- FPS");
     counter_lines[counter_n++] = buf;
@@ -1002,10 +1003,10 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
         counter_lines[counter_n++] = buf;
     }
     if (detail >= 2) {
-        if (snap.valid) std::snprintf(buf, sizeof buf, "1%% low %.0f", snap.low1_fps);
+        if (snap.valid) std::snprintf(buf, sizeof buf, "%s1%% low %.0f", real, snap.low1_fps);
         else std::snprintf(buf, sizeof buf, "1%% low --");
         counter_lines[counter_n++] = buf;
-        if (snap.valid) std::snprintf(buf, sizeof buf, "max %.1f ms", snap.max_ms);
+        if (snap.valid) std::snprintf(buf, sizeof buf, "%smax %.1f ms", real, snap.max_ms);
         else std::snprintf(buf, sizeof buf, "max -- ms");
         counter_lines[counter_n++] = buf;
     }

@@ -102,6 +102,8 @@ void set_shown_ratio(double game, double shown, uint32_t on) {
     const bool mostly_on = game > 0 && on * 2 >= game;
     g_shown_ratio.store(mostly_on ? static_cast<float>(shown / game) : 0.0f, std::memory_order_relaxed);
 }
+// Generation stopped for good (no more reports): the counter goes back to the game's own rate.
+void clear_shown_ratio() { g_shown_ratio.store(0.0f, std::memory_order_relaxed); }
 
 void on_api_error(const sl::APIError& e) { g_api_error.store(static_cast<int>(e.vkRes), std::memory_order_relaxed); }
 
@@ -277,6 +279,7 @@ void set_mode(State& s, bool on) {
         NXLOG_E(kTag, "slDLSSGSetOptions failed (%d): frame generation off", static_cast<int>(r));
         s.fg = false;
         s.on = false;
+        clear_shown_ratio();
         return;
     }
     if (on != s.on) NXLOG_I(kTag, "frame generation %s at frame %u", on ? "on" : "off", s.index);
@@ -517,7 +520,10 @@ void framegen_present_begin(VkCommandBuffer cb, VkExtent2D backbuffer, VkExtent2
 void framegen_present_end() {
     State& s = st();
     if (fg_setting() == 3) {
-        if (!ffx_fg_wanted()) return;
+        if (!ffx_fg_wanted()) {
+            clear_shown_ratio();
+            return;
+        }
         ++s.n_game;
         s.n_on += s.on ? 1 : 0;
         const uint64_t now = FrameLimiter::now_ns();
@@ -536,7 +542,11 @@ void framegen_present_end() {
             s.n_game = s.n_on = s.n_extra_inputs = 0;
         }
     } else {
-        if (!temporal_dlss_started() || !base_init()) return;
+        if (!temporal_dlss_started() || !base_init()) {
+            clear_shown_ratio();
+            return;
+        }
+        if (!s.fg) clear_shown_ratio();   // DLSS-G not running or stopped (slDLSSGSetOptions failed): no more reports
     }
     if (s.markers) marker(s, sl::PCLMarker::ePresentEnd);
     if (s.fg) {
@@ -595,6 +605,7 @@ void framegen_shutdown(void* gfx_device) {
     }
     for (auto& p : s.retired) s.dev->destroy_image(p.second);
     s = State();
+    clear_shown_ratio();
 }
 
 float framegen_shown_ratio() { return g_shown_ratio.load(std::memory_order_relaxed); }
